@@ -1,0 +1,69 @@
+/* dsh-plugin-ui · 设计 Token 单一真源（canonical）
+ * 规范与理由：见同 skill 的 SKILL.md ｜ 取值出处：references/出处与取证.md
+ * 用法：消费方把本文件从第一行「:root 定义块」起的全部内容**逐字内联**到自己的样式里，
+ *       并原样保留下面这行 stamp 注释（守卫 G11 按它比对源一致性）。
+ * 不要手改内联副本 —— 改这里，再重新内联。
+ * 本文件必须能安全内联进 JS 模板字符串：注释与正文里都不许出现反引号、美元花括号、反斜杠。
+ *       （脚本 scripts/sync-tokens.mjs 会在内联前把这条当硬闸门检查。）
+ * stamp: dsh-plugin-ui-tokens ca3dc0bf5f60e93d
+ */
+
+:root{
+  --dui-bg:var(--dsw-alias-bg-base,#fff);
+  --dui-fg:var(--dsw-alias-label-primary,#0f1115);
+  --dui-fg-2:var(--dsw-alias-label-secondary,#61666b);
+  --dui-fg-3:var(--dsw-alias-label-caption,#adb2b8);
+  --dui-line:var(--dsw-alias-border-l2,#0000001a);
+  --dui-line-2:var(--dsw-alias-border-l3,#0000001f);
+  --dui-hover:rgba(38,49,72,.024);
+  --dui-active:rgba(38,49,72,.061);
+  --dui-chip:rgba(38,49,72,.092);
+  --dui-accent:var(--dsw-alias-brand-primary-new-colorprimary-new-color,#4176e6);
+  --dui-ok:var(--dsw-alias-state-success-primary,#22c55e);
+  --dui-bad:var(--dsw-alias-state-error-primary,#ec1313);
+  --dui-warn:var(--dsw-alias-state-warn-primary,#f59e0b);
+  --dui-shadow-overlay:0 10px 28px rgba(15,17,21,.14);
+  --dui-scrim:rgba(15,17,21,.28);
+  --dui-on-accent:#fff;
+  --dui-on-inverse:#fff;
+  --dui-radius-sm:6px;
+  --dui-radius:8px;
+  --dui-radius-lg:12px;
+  --dui-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+
+/* DSH 真实机制：宿主在深色下给 body 加 data-ds-dark-theme */
+body[data-ds-dark-theme]{
+  --dui-bg:var(--dsw-alias-bg-base,#151517);
+  --dui-fg:var(--dsw-alias-label-primary,#f9fafb);
+  --dui-fg-2:var(--dsw-alias-label-secondary,#cfd3d6);
+  --dui-fg-3:var(--dsw-alias-label-caption,#81858c);
+  --dui-line:var(--dsw-alias-border-l2,#ffffff1f);
+  --dui-line-2:var(--dsw-alias-border-l3,#ffffff29);
+  --dui-hover:rgba(255,255,255,.028);
+  --dui-active:rgba(255,255,255,.076);
+  --dui-chip:rgba(255,255,255,.114);
+  --dui-accent:var(--dsw-alias-brand-primary-new-colorprimary-new-color,#5686fe);
+  --dui-ok:var(--dsw-alias-state-success-primary,#22c55e);
+  --dui-bad:var(--dsw-alias-state-error-primary,#f25a5a);
+  --dui-warn:var(--dsw-alias-state-warn-primary,#f59e0b);
+  --dui-shadow-overlay:0 10px 28px rgba(0,0,0,.44);
+}
+
+/* 兜底路径：不在 DSH 里（例如直接 file:// 打开原型）时跟随系统深色 */
+@media (prefers-color-scheme:dark){
+  :root{
+    --dui-bg:#151517;
+    --dui-fg:#f9fafb;
+    --dui-fg-2:#cfd3d6;
+    --dui-fg-3:#81858c;
+    --dui-line:#ffffff1f;
+    --dui-line-2:#ffffff29;
+    --dui-hover:rgba(255,255,255,.028);
+    --dui-active:rgba(255,255,255,.076);
+    --dui-chip:rgba(255,255,255,.114);
+    --dui-accent:var(--dsw-alias-brand-primary-new-colorprimary-new-color,#5686fe);
+    --dui-bad:var(--dsw-alias-state-error-primary,#f25a5a);
+    --dui-shadow-overlay:0 10px 28px rgba(0,0,0,.44);
+  }
+}

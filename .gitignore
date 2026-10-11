@@ -1,0 +1,10 @@
+# 依赖与构建
+node_modules/
+
+# 本机产物 / 临时文件
+*.log
+.DS_Store
+npm-debug.log*
+
+# 本机私有的发布档案（跟着仓库走的那份；本机用的是 skill 的 profiles/）
+.dsh-release.json

@@ -1,0 +1,5 @@
+# Agent 交付验收台（dsh-acceptance）bundle。
+# `id` / `name` 是插件标识，与 npm 包名一致，**不随品牌迁移改名**。
+- insert:
+    - id: dsh-acceptance
+      name: 'dsh-acceptance'

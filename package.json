@@ -1,0 +1,63 @@
+{
+  "name": "dsh-acceptance",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "Agent 交付验收台：任务级的凭证工作台 —— 逐条原始需求 ↔ 证据的映射，证据绑定的版本与过期。",
+  "license": "MIT",
+  "main": "./src/dsh/host/index.js",
+  "exports": {
+    ".": "./src/dsh/host/index.js",
+    "./client": "./dist/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "test",
+    "assets",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-modules",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test",
+    "verify": "node scripts/verify-project.mjs",
+    "build": "node scripts/build-client.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "pretest": "node scripts/build-client.mjs",
+    "prepack": "node scripts/build-client.mjs"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "acceptance",
+    "delivery",
+    "evidence",
+    "receipt"
+  ],
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}
