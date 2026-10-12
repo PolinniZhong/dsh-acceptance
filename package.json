@@ -1,6 +1,6 @@
 {
   "name": "dsh-acceptance",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Agent 交付验收台：任务级的凭证工作台 —— 逐条原始需求 ↔ 证据的映射，证据绑定的版本与过期。",
   "license": "MIT",

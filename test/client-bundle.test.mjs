@@ -116,6 +116,7 @@ const STUB_REACT = {
   useEffect: () => {},
   useRef: () => ({ current: null }),
   useCallback: (fn) => fn,
+  useMemo: (fn) => fn(),
 }
 const ReactForLoad = runtime ? runtime.React : STUB_REACT
 
@@ -552,4 +553,358 @@ test('证据默认折叠：摘要里有编号、种类与弱化来源，完整�
   assert.ok(html.includes('退出码 0'), '摘要行没带弱化来源（退出码）')
   assert.ok(html.includes('第一行观察'), '摘要行没有一句话观察到什么')
   assert.ok(html.includes('第二行细节'), '折叠里没有完整输出')
+})
+
+// ---------------------------------------------------------------------------
+// v0.1.2 §5「首次使用与验收流程引导」：每一节都要有会红的断言
+//
+// 首屏那几张屏（空状态 / 有任务没选中）在静态渲染里本来出不来 —— 它们由 useEffect 里的
+// 取数决定。产物为此留了一个**只读的测试接缝** `__testInitial`（浏览器里永远不传），
+// 所以下面几条是**真的把那段界面渲染出来**再断言，不是拿源码文本碰运气。
+// ---------------------------------------------------------------------------
+
+/** 渲染 Workbench 的某一屏：`boot` 就是那个测试接缝。 */
+function bootOf() {
+  const { factoryRequiring } = loadBundle()
+  const { mod } = factoryRequiring({ react: runtime.React })
+  const noop = async () => ({})
+  const io = { getJson: noop, getText: async () => '', postJson: noop, postText: async () => '' }
+  const render = (boot) =>
+    runtime.renderToStaticMarkup(
+      runtime.React.createElement(mod.__views.Workbench, {
+        sessionId: 'probe',
+        __testInitial: { io, loading: false, ...boot },
+      }),
+    )
+  return { mod, render }
+}
+
+/**
+ * 拿真的中文字典当 `t`。**不要用 `t => t` 回显键名**：那样断言只能证明「用了一个键」，
+ * 证明不了用户会看到方案里那句原话。
+ */
+function zhDictOf(mod) {
+  const regs = []
+  mod.apply({
+    locale: { register: (_ns, dicts) => regs.push(dicts) },
+    slots: { inject: (_name, cb) => cb(), register: () => {} },
+  })
+  const zh = regs[0]?.zh ?? {}
+  return (key) => zh[key] ?? key
+}
+
+/** 只渲染一个小组件（默认用真的中文字典，所以断言看得见用户实际读到的那句话）。 */
+function viewHtml(mod, name, props = {}) {
+  return runtime.renderToStaticMarkup(
+    runtime.React.createElement(mod.__views[name], { t: zhDictOf(mod), ...props }),
+  )
+}
+
+const TASK = { taskId: 'task-1', taskTitle: '健康检查接口' }
+
+test('§5.1 没有任务时是「开始一次交付验收」的开始页，四条引号里的原话一个不少', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { render } = bootOf()
+  const html = render({ tasks: [] })
+  for (const line of [
+    '开始一次交付验收',
+    '把本次开发需求列成检查项，再根据证据决定是否接受交付。',
+    '新建验收任务',
+    '写下需求 → 确认验收项 → 查看证据并作出决定',
+  ]) {
+    assert.ok(html.includes(line), `首屏少了方案 §5.1 的原话「${line}」：\n${html.slice(0, 700)}`)
+  }
+})
+
+test('§5.1「查看示例」明说自己是示例，且不出现任何像真实任务/真实证据的东西', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { render } = bootOf()
+  const html = render({ tasks: [] })
+  assert.ok(html.includes('查看示例'), '没有渲染出「查看示例」入口')
+  assert.ok(html.includes('示例，不会写入凭证也不会创建任务'), '示例没有显式标注')
+  // 这条是**反例**：示例块里一条真实证据编号都不许有 —— 它最容易让示例看起来像真凭证。
+  assert.match(html, /示例/, '示例块不见了')
+  const sampleBlock = html.slice(html.indexOf('查看示例'))
+  assert.ok(!/EV-\d{4}/.test(sampleBlock), `示例里出现了像真实证据的东西：\n${sampleBlock.slice(0, 400)}`)
+  assert.ok(!/AC-\d{2}/.test(sampleBlock), '示例里出现了像真实验收项编号的东西')
+})
+
+test('§5.1「一个任务都没有」与「有任务但没选中」是两句不同的话，且空状态没有决定栏', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { render } = bootOf()
+  const empty = render({ tasks: [] })
+  const pick = render({ tasks: [TASK] })
+  assert.ok(empty.includes('开始一次交付验收'), '空状态没走开始页')
+  assert.ok(pick.includes('选择一个任务继续'), '有任务但没选中时没说「选择一个任务继续」')
+  assert.ok(!pick.includes('开始一次交付验收'), '把「有任务但没选中」渲染成了空状态')
+  // 「还没有验收任务」时还没有可决定的对象：决定栏不该出现（§8）。
+  // 注意判据要挑决定栏独有的东西 —— 开始页那句解释里本来就含「是否接受交付」。
+  assert.ok(!empty.includes('acc-foot'), '空状态就摆了决定栏')
+  assert.ok(!pick.includes('acc-foot'), '没选中任务时摆了决定栏')
+})
+
+test('§5.2 新建任务表单用新文案，并且在空状态里也能被打开', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { mod, render } = bootOf()
+  const form = viewHtml(mod, 'NewTaskForm', { busy: false, onCreate: () => {} })
+  for (const line of [
+    '这次开发做了什么？（可选）',
+    '把你最初交给开发 Agent 的需求粘贴到这里',
+    '保留原始表述。后续会把每条验收项和这份需求对应起来。',
+    '创建并设置验收项',
+  ]) {
+    assert.ok(form.includes(line), `新建任务表单少了「${line}」`)
+  }
+  // 空状态里点「新建验收任务」就能写下需求 —— 不必先切到别处。
+  const html = render({ tasks: [], taskId: null, showNew: true })
+  assert.ok(html.includes('把你最初交给开发 Agent 的需求粘贴到这里'), '空状态里打不开新建任务表单')
+})
+
+test('§5.3 验收项整理提示词是纯文本：带齐六件事，并把需求原文逐字带进去', () => {
+  const { factoryRequiring } = loadBundle()
+  const { mod } = factoryRequiring({ react: ReactForLoad })
+  const text = mod.__pure.acceptancePromptText
+  assert.equal(typeof text, 'function', '产物没有导出 acceptancePromptText')
+  const requirement = '健康检查接口要返回 200，并且响应里有 status 字段。'
+  const prompt = text(requirement)
+  for (const word of ['逐条', '通过条件', '验证方式', '原始需求', '建议补充', '待澄清']) {
+    assert.ok(prompt.includes(word), `提示词少了「${word}」`)
+  }
+  assert.ok(prompt.includes(requirement), '提示词没有把需求原文逐字带进去')
+  // 它只是文本：不许宣称已经调用模型或已生成验收项。
+  assert.ok(!prompt.includes('已生成') && !prompt.includes('已经调用'), '提示词在宣称插件做了什么')
+  // 没有需求时也不能吐出半截提示词。
+  assert.ok(text('').includes('（这里放你的原始需求）'), '没有需求原文时没有给出占位说明')
+  assert.ok(text(null).includes('原始需求'), 'null 输入把提示词弄坏了')
+})
+
+test('§5.4 取证入口说人话：主选项 + 次选项，正文里不出现「模式 A / 模式 B」', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { mod } = bootOf()
+  const main = viewHtml(mod, 'ReverifyButton', { busy: false, sessionId: 'S-1', activeCount: 2, onVerify: () => {} })
+  for (const line of [
+    '让独立 Agent 帮我验证',
+    '由 DSH 委派独立 Agent 检查已确认的验收项，并返回结构化证据。',
+    '验证过程可能不可见，最长等待时间以当前实现为准。',
+  ]) {
+    assert.ok(main.includes(line), `主取证入口少了「${line}」`)
+  }
+  const second = viewHtml(mod, 'MoreWays', { busy: false, onGenerate: async () => '', onImport: async () => {} })
+  assert.ok(second.includes('我已经有检查结果'), '次选项不见了')
+  assert.ok(
+    second.includes('从验收包获取结构化格式，在外部完成检查后，将结果导入验收台。'),
+    '次选项没有一句解释',
+  )
+  const all = main + second
+  assert.ok(!all.includes('模式 A') && !all.includes('模式 B'), '主流程里还露着「模式 A / 模式 B」')
+  // 展开次选项**之前**不显示生成验收包、粘贴 JSON 这些技术步骤。
+  assert.ok(!second.includes('粘贴结构化结果'), '次选项还没展开就把技术步骤摆出来了')
+})
+
+test('§5.4 委派前置不满足时，动作前就写清原因，并给出替代路径', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { mod } = bootOf()
+  const noSession = viewHtml(mod, 'ReverifyButton', { busy: false, sessionId: null, activeCount: 2, onVerify: () => {} })
+  const noCriteria = viewHtml(mod, 'ReverifyButton', { busy: false, sessionId: 'S-1', activeCount: 0, onVerify: () => {} })
+  for (const html of [noSession, noCriteria]) {
+    assert.ok(html.includes('我已经有检查结果'), '前置不满足时没有给出替代路径')
+    assert.ok(/<button[^>]*disabled/.test(html), '前置不满足时按钮居然是可点的')
+  }
+  assert.ok(noSession.includes('这个页面没拿到会话 ID，无法委派。'), '没说清缺的是会话 ID')
+  assert.ok(noCriteria.includes('还没有验收项'), '没说清缺的是验收项')
+})
+
+test('§5.4 宿主没有委派能力时也在动作前说明；但「不知道」不许显示成「不可用」', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { mod } = bootOf()
+  const base = { busy: false, sessionId: 'S-1', activeCount: 2, onVerify: () => {} }
+  // 宿主明说没有（health.capabilities.delegate === false）⇒ 禁用 + 原因 + 替代路径
+  const unsupported = viewHtml(mod, 'ReverifyButton', { ...base, delegateAvailable: false })
+  assert.ok(/<button[^>]*disabled/.test(unsupported), '宿主说没有委派能力，按钮却可点')
+  assert.ok(unsupported.includes('当前宿主没有可用的委派能力'), '没说清为什么不能委派')
+  assert.ok(unsupported.includes('我已经有检查结果'), '没给出替代路径')
+  // 老版本宿主没有这个字段 = 未知 ⇒ **不拦**（把「不知道」当「不可用」会冤枉一个本来能跑的宿主）
+  const unknown = viewHtml(mod, 'ReverifyButton', { ...base, delegateAvailable: undefined })
+  assert.ok(!/<button[^>]*disabled/.test(unknown), '字段缺失（未知）时不该禁用按钮')
+  assert.ok(!unknown.includes('当前宿主没有可用的委派能力'), '字段缺失时不该说人家没有能力')
+})
+
+test('§5.5 下一步指引是宿主 counts 的纯函数映射，六种情形各一句', () => {
+  const { factoryRequiring } = loadBundle()
+  const { mod } = factoryRequiring({ react: ReactForLoad })
+  const hint = mod.__pure.nextStepHint
+  assert.equal(typeof hint, 'function', '产物没有导出 nextStepHint')
+  const counts = (patch) => ({ pending: 0, pass: 0, fail: 0, unknown: 0, blocked: 0, ...patch })
+
+  // 全部还没结论，而且一条证据都没有 ⇒ 说「先开始验证」。
+  assert.equal(hint(counts({ pending: 2 }), { evidenceCount: 0 }), 'stepNoEvidence')
+  // 只要有证据，「还没有证据」那句就不成立，退回「还有验收项没有结论」。
+  assert.equal(hint(counts({ pending: 2 }), { evidenceCount: 1 }), 'stepPending')
+  assert.equal(hint(counts({ pending: 1, fail: 1 }), { evidenceCount: 2 }), 'stepFail')
+  assert.equal(hint(counts({ pending: 1, blocked: 1 }), { evidenceCount: 2 }), 'stepBlocked')
+  assert.equal(hint(counts({ pending: 1, unknown: 1 }), { evidenceCount: 2 }), 'stepUnknown')
+  assert.equal(hint(counts({ pass: 3 }), { evidenceCount: 3 }), 'stepAllPass')
+  // 有结论的项优先于没结论的项：fail 压过 pending。
+  assert.equal(hint(counts({ pending: 9, fail: 1 }), { evidenceCount: 5 }), 'stepFail')
+  // 输入坏掉时不许抛（宿主可能老、字段可能缺）。
+  assert.equal(typeof hint(undefined, undefined), 'string')
+  assert.equal(typeof hint({}, {}), 'string')
+})
+
+test('§5.5 指引读的是宿主派生的 counts，并在底部决定栏里显示出来', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { mod } = bootOf()
+  const criteria = [{ id: 'AC-01', title: '健康检查 200' }]
+  const html = viewHtml(mod, 'FooterBar', {
+    busy: false,
+    decision: null,
+    criteria,
+    statuses: { 'AC-01': 'fail' },
+    evidenceCount: 1,
+    stepHint: mod.__pure.nextStepHint({ pending: 0, pass: 0, fail: 1, unknown: 0, blocked: 0 }, { evidenceCount: 1 }),
+    onDecide: () => {},
+    onExport: async () => '',
+    onRepair: () => '',
+  })
+  assert.ok(html.includes('下一步'), '决定栏没有「下一步」标签')
+  assert.ok(
+    html.includes('发现不符合要求的项目。可以生成修复说明并交回开发 Agent。'),
+    '决定栏没有显示与当前结果匹配的那一句',
+  )
+})
+
+test('§5.6 修复说明按四类分开写（不统称失败），并保留原话里的含义', () => {
+  const { factoryRequiring } = loadBundle()
+  const { mod } = factoryRequiring({ react: ReactForLoad })
+  const criteria = [
+    { id: 'AC-01', title: 'a' },
+    { id: 'AC-02', title: 'b' },
+    { id: 'AC-03', title: 'c' },
+    { id: 'AC-04', title: 'd' },
+    { id: 'AC-05', title: 'e' },
+  ]
+  const statuses = { 'AC-01': 'pass', 'AC-02': 'fail', 'AC-03': 'unknown', 'AC-04': 'blocked', 'AC-05': 'pending' }
+  const text = mod.__pure.buildRepairText({ requirementText: '需求原文' }, statuses, criteria)
+  for (const heading of ['已证实未通过', '尚无法判断', '环境阻塞', '待验收']) {
+    assert.ok(text.includes(heading), `修复说明少了「${heading}」这一组`)
+  }
+  // 通过的项一条都不列（它不需要修），只用一句话说明还有多少项已通过。
+  assert.ok(!text.includes('AC-01'), '把已通过的项也列进了修复说明')
+  assert.ok(text.includes('另有 1 项已通过'), '没有说明还有几项已通过')
+  // 「没验证」不许被写成「已失败」。
+  assert.ok(!text.includes('全部失败'), '把四类统称成了失败')
+})
+
+test('§5.5 下一步只显示一处（不重复占地方），且一条证据都没有时与「有证据但没结论」分开说', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { mod, render } = bootOf()
+  const receipt = {
+    taskId: 't1',
+    taskTitle: '健康检查',
+    requirementText: '需求原文',
+    criteria: [{ id: 'AC-01', title: '健康检查 200' }],
+    evidence: [],
+    rounds: [],
+    decision: null,
+    scope: { cwd: '/tmp', changedFilesSource: 'no-session' },
+  }
+  const detail = {
+    receipt,
+    derived: {
+      statuses: { 'AC-01': 'pending' },
+      counts: { pending: 1, pass: 0, fail: 0, unknown: 0, blocked: 0 },
+      stale: [],
+    },
+  }
+  const html = render({
+    tasks: [TASK],
+    taskId: 'task-1',
+    detail,
+  })
+  assert.equal(
+    html.split('<div class="acc-step">').length - 1,
+    1,
+    '「下一步」出现了不止一处 —— 同一句话重复占地方（§4.5 视觉克制）',
+  )
+  assert.ok(html.includes('先开始验证，当前还没有可供判断的证据。'), '一条证据都没有时没说「先开始验证」')
+  assert.ok(html.includes('让独立 Agent 帮我验证'), '主取证入口不见了')
+  assert.ok(html.includes('确认验收标准'), '验收项的确认按钮不见了')
+})
+
+test('§5.6 导出与决定的用途写在按钮旁边，三个决定齐全', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { mod } = bootOf()
+  const html = viewHtml(mod, 'FooterBar', {
+    busy: false,
+    decision: null,
+    criteria: [{ id: 'AC-01', title: 'a' }],
+    statuses: { 'AC-01': 'pending' },
+    evidenceCount: 0,
+    stepHint: 'stepNoEvidence',
+    onDecide: () => {},
+    onExport: async () => '',
+    onRepair: () => '',
+  })
+  for (const label of ['接受交付', '要求修复', '暂缓验收', '导出验收记录', '生成修复说明']) {
+    assert.ok(html.includes(label), `决定栏少了「${label}」`)
+  }
+  assert.ok(html.includes('整理未通过、尚未确定和被环境阻塞的事项，交给开发 Agent 继续处理。'), '没说修复说明是干什么的')
+  assert.ok(html.includes('导出当前验收凭证，不会触发新的验证。'), '没说导出只导出凭证')
+})
+
+test('§5.7 版本未知保留事实，并解释「为什么未知」，不编造指纹', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { mod } = bootOf()
+  const html = viewHtml(mod, 'DetailPane', {
+    criterion: { id: 'AC-01', title: 'a', origin: 'original' },
+    receipt: {
+      requirementText: '需求原文',
+      criteria: [],
+      evidence: [],
+      rounds: [],
+      scope: { cwd: '/tmp', changedFilesSource: 'no-session' },
+    },
+    status: 'pending',
+    stale: new Set(),
+  })
+  assert.ok(html.includes('版本未知'), '把「版本未知」这条事实藏起来了')
+  assert.ok(
+    html.includes('当前没有取得可靠的代码版本快照，因此本次凭证无法确认绑定到哪个代码版本。'),
+    '没有解释「版本未知」的原因',
+  )
+  // 没有可靠依据时不许显示确定的「已过期」。
+  assert.ok(!html.includes('已过期'), '在没有可靠依据时说了「已过期」')
 })

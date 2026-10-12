@@ -193,6 +193,11 @@ export function apply(ctx, config = {}) {
         producers: PRODUCERS,
         dataRoot: root,
         uptimeMs: Date.now() - startedAt,
+        // 界面要在**动作之前**说清「现在有没有委派能力」（v0.1.2 §5.4）—— 在此之前客户端只能等点击后
+        // 由宿主用 4xx 拒绝。判据就是宿主自己那一件事：`subagents` 服务在不在。
+        // ⚠️ 它**不是保证**：服务在，也可能因为没有活着的会话 Agent / provider 不存在而在承诺点之前 4xx。
+        // 所以取值只有 true / false，字段名也别起成 `canDelegate` 那种承诺式的。
+        capabilities: { delegate: subagents !== null && subagents !== undefined },
       }),
     )
 

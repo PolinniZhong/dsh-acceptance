@@ -166,6 +166,23 @@ test('模块导出 name 与 apply', () => {
   assert.equal(typeof apply, 'function')
 })
 
+test('health 报出「现在有没有委派能力」—— 界面靠它在**动作之前**说明原因（v0.1.2 §5.4）', async () => {
+  // 没有 subagents 服务 ⇒ delegate=false（界面据此禁用主入口并给出替代路径）
+  await withStore(async ({ call }) => {
+    const { status, body } = await readJson(await call('/api/acceptance.health'))
+    assert.equal(status, 200)
+    assert.deepEqual(body.capabilities, { delegate: false })
+  })
+  // 有 subagents 服务 ⇒ delegate=true。⚠️ 它**不是保证**：能不能真跑仍由承诺点之前的 4xx 决定。
+  await withStore(
+    async ({ call }) => {
+      const { body } = await readJson(await call('/api/acceptance.health'))
+      assert.deepEqual(body.capabilities, { delegate: true })
+    },
+    { subagents: { list: () => [], start: async () => ({}) } },
+  )
+})
+
 test('health 报出五态与数据根，并禁止缓存', async () => {
   await withStore(async ({ call, root }) => {
     const response = await call('/api/acceptance.health')

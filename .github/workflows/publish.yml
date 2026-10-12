@@ -41,7 +41,7 @@ jobs:
       # devDependencies 里的 esbuild / react / react-dom 是构建与客户端产物测试需要的。
       - run: npm install --no-audit --no-fund
 
-      # 发版前的门：62 项必须全绿（pretest 会先重建 dist/client.js）
+      # 发版前的门：77 项必须全绿（pretest 会先重建 dist/client.js）
       - run: npm test
 
       # 推 tag 触发时，挡一下「tag 与 package.json 版本不一致」

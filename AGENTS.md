@@ -75,7 +75,7 @@ dist/client.js            发布产物，提交进仓库
 
 ```bash
 node scripts/verify-project.mjs   # G1–G11，11/11 才算过
-npm test                          # pretest 会先重建客户端；62 个行为断言（gate 14 + host 29 + client 19）
+npm test                          # pretest 会先重建客户端；77 个行为断言（gate 14 + host 30 + client 33）
 ```
 
 | 守卫 | 钉住什么 |
@@ -169,6 +169,8 @@ HTTP **仍 200** 且带 `blocked: true`（决策记录 D-018）。
 - `run` 用完必须 `dispose()`（失败路径也要），且清理异常**不许盖住**结论。
 - `provenance.fingerprint` 恒 `null`；`timeoutMs` 默认 `600000`；`agentOptions` 只在显式传了正整数 `maxTokens` 时给。
 - **错误响应两种形态照旧**（§8.1）：4xx 走 `{error}`，`blocked` 轮次走 200 的正常响应体。客户端两条路径都要接。
+- **`.health` 报 `capabilities.delegate`**（v0.1.2）：由 `subagents` 服务是否存在推导，界面据此在**动作之前**说明「没有委派能力」并给替代路径。
+  它**不是保证** —— 服务在也可能因没有活着的会话 Agent 而 4xx；字段缺失（老宿主）等于**未知，客户端不许禁用按钮**。
 
 ### 8.3 模式 B（`.import`）：**必须与模式 A 同规矩**（决策记录 D-021、D-022）
 
