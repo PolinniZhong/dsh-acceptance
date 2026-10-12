@@ -27,6 +27,11 @@
 - 本版**没有**实现代码版本指纹，也没有实现证据过期判断：界面只保留事实解释，不显示确定的「已过期」。
 - P1（可复制的示例模板、逐状态文案优化）不在本版，留待 v0.1.3。
 
+### 发布
+
+- tag `v0.1.2` · 提交 `9766dfe` · 2026-10-12 · [GitHub Release](https://github.com/PolinniZhong/dsh-acceptance/releases/tag/v0.1.2)
+- 平台：**GitHub**（tag + Release）。**npm 本版未发** —— registry 上还没有这个包，首个版本要先做一次带 OTP 的本地 `npm publish` 建包，之后才回到 OIDC 可信发布（`.github/workflows/publish.yml` 已就位）。
+
 ## [0.1.1] - 2026-10-11
 
 首个公开发布版。核心是「任务级的凭证工作台」：逐条原始需求 ↔ 证据的映射，以及证据的版本绑定与过期。
