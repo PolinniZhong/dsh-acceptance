@@ -42,7 +42,17 @@
 - `scope.fingerprint` 首版恒 `null` = 「版本未知」。**禁止**用变更文件列表派生哈希冒充。
 - 本版**没有**实现证据过期判断与 `.repairs` 路由；P1（跳过项的界面呈现、模式 B 的确认约束）留待下一版。
 
+### 发布
 
+- tag `v0.2.0` · 提交 `a389508` · 2026-10-13 · [GitHub Release](https://github.com/PolinniZhong/dsh-acceptance/releases/tag/v0.2.0)
+- **GitHub**：tag / main / Release 三处 sha 逐字一致（`a389508`）；Release 正文从本节切（68 行 / 8045 B）。
+- **npm**：`npm publish`（本地通道）→ npm 把它**转成了暂存发布** —— registry 上只留下占位版本 `0.0.0-stage`
+  （逐字描述：`Temporary package placeholder for staged publishing`），`npm stage list` 回空，
+  `dsh-acceptance-0.2.0.tgz` 仍 **404**。⇒ **npm 本版未上线**；tarball 的 shasum（本地那次发布报的）为 `5ea3a42bcf8d909285cb387351654d13ad8df3c8`
+  （20 个文件），一旦批准即可核对。下一步：在 npm 侧完成这次暂存的「到场证明」（OTP），或绑 Trusted Publisher
+  后把档案 `channel` 改成 `oidc-workflow` 走 OIDC 重发。
+
+## [0.1.2] - 2026-10-12
 
 首次使用与验收流程引导。本版**只改客户端呈现与文案**：`schemaVersion` 仍为 1、五态键与语义不变、宿主 9 条路由不变（唯一的一处宿主改动是 `/api/acceptance.health` 多了一个能力字段）。
 
