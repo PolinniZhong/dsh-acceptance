@@ -19,13 +19,19 @@ export const SCHEMA_VERSION = 1
  */
 export const STATUSES = Object.freeze(['pending', 'pass', 'fail', 'unknown', 'blocked'])
 
-/** 五态的中文显示名。它是一个**列表**，不是一个分数。 */
+/**
+ * 五态的中文显示名。它是一个**列表**，不是一个分数。
+ *
+ * ⚠️ 这五个词必须与客户端显示名**逐字一致**（2026-10-10 评审定稿：待验收 / 通过 / 未通过 /
+ * 无法判断 / 环境阻塞）。导出如果自己叫另一套名字，导出就比界面更可信 —— 那是退步。
+ * 守卫 G16 钉住这件事。
+ */
 export const STATUS_LABELS = Object.freeze({
-  pending: '待验证',
+  pending: '待验收',
   pass: '通过',
   fail: '未通过',
-  unknown: '未验证',
-  blocked: '被阻塞',
+  unknown: '无法判断',
+  blocked: '环境阻塞',
 })
 
 /** 证据种类（SDD §4.1）。`kind` 与 `ref.type` 必须相等。 */
@@ -38,6 +44,47 @@ export const ORIGINS = Object.freeze(['original', 'suggested'])
 
 /** 写入模式（SDD §6）：谁产出了这一轮结论。记事实，不排名。 */
 export const PRODUCERS = Object.freeze(['agent', 'manual', 'pasted'])
+
+/**
+ * 自动返修 / 重验的轮次上限（SDD §16.2）—— 到了就必须停下来交人决定。
+ *
+ * **不是一个可调参数**：它是产品约束，不是性能旋钮。无限循环不会报错，只会烧钱与漂移
+ * （守卫 G18 钉死边界）。
+ */
+export const DEFAULT_ROUND_LIMIT = 2
+
+/**
+ * 校验一条**返修项**（SDD §16.1，守卫 G15）。
+ *
+ * 两条硬规则：
+ *  1. `fail` 必须带 `evidenceIds`（有证据的问题）；
+ *  2. `unknown` / `blocked` 必须带 `unverifiedReason`（缺什么证据 / 先解哪个障碍）。
+ *
+ * 两者皆缺 ⇒ 拒绝。理由：否则「无证据的通过」会换张脸从 `needs_fix` 溜进来。
+ *
+ * @returns {string[]} 错误列表，空数组即合格
+ */
+export function validateRepairItem(item) {
+  const errors = []
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return ['返修项不是对象']
+  const id = item.criterionId
+  if (typeof id !== 'string' || id.trim() === '') errors.push('返修项缺 criterionId')
+  if (!STATUSES.includes(item.status)) {
+    errors.push(`${String(id)} 的 status ${JSON.stringify(item.status)} 不是五态之一`)
+    return errors
+  }
+  const hasEvidence = Array.isArray(item.evidenceIds) && item.evidenceIds.length > 0
+  const hasReason = typeof item.unverifiedReason === 'string' && item.unverifiedReason.trim() !== ''
+  if (item.status === 'pass' || item.status === 'pending') {
+    errors.push(`${String(id)} 的 status 是 ${item.status} —— 只有 fail / unknown / blocked 才产生返修项`)
+  } else if (item.status === 'fail' && !hasEvidence) {
+    errors.push(`${String(id)} 判 fail 却没有 evidenceIds —— 没有定位证据的问题不许进返修清单`)
+  } else if ((item.status === 'unknown' || item.status === 'blocked') && !hasReason) {
+    // unknown / blocked **不是 bug**：要说清缺什么证据、或先解哪个环境障碍。
+    errors.push(`${String(id)} 判 ${item.status} 却没有 unverifiedReason —— 没说清缺什么`)
+  }
+  return errors
+}
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -799,7 +846,19 @@ export function buildDelegationPrompt(receipt) {
   lines.push('## 三条硬规则')
   lines.push('')
   lines.push('1. **没有证据就不是通过。** 查不到就写 `unknown`（未验证），**不要**猜成 `pass`，也**不要**自动判成 `fail`。')
-  lines.push('2. **每条证据必须可寻址。** 命令证据带退出码和**命令原文**；文件证据带**绝对路径和行号**；观察证据写清是谁在何时何地看到的。')
+  lines.push('2. **每条证据必须可寻址，而且格式要逐字对上。** 写错格式的整条证据会被拒，**整轮一条结论都写不进去**：')
+  lines.push('')
+  lines.push('   | `kind` | `locator` 必须长成这样 | 还要带什么 |')
+  lines.push('   |---|---|---|')
+  lines.push('   | `command` | **单行**命令原文（不能换行） | `exitCode`：**整数**，必填 |')
+  lines.push('   | `file` | `/绝对/路径/文件.js:42` 或 `/绝对/路径/文件.js:42-58` | —— |')
+  lines.push('   | `url` | 以 `http://` 或 `https://` 开头 | —— |')
+  lines.push('   | `screenshot` | 绝对路径，且以 `.png/.jpg/.jpeg/.webp` 结尾 | —— |')
+  lines.push('   | `observation` | `谁｜何时｜在哪台机器或会话｜观察到的现象`——**恰好 3 个全角「｜」** | —— |')
+  lines.push('')
+  lines.push('   ⚠️ 三条最容易踩的：**`observation` 只写一句话不算**（必须 4 段、3 个「｜」）；')
+  lines.push('   **`command` 不给整数 `exitCode` 不算**；**`file` 给相对路径或漏掉行号不算**。')
+  lines.push('   拿不出合规证据的项，就判 `unknown` 并在 `note` 里写清缺什么 —— 那比编一条形似证据的东西强。')
   lines.push('3. **不许给总分或任何汇总比率。** 五态并列，逐项给结论。')
   lines.push('')
   lines.push('## 额外说明')

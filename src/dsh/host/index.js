@@ -19,21 +19,18 @@ import {
   STATUSES,
   appendRound,
   buildAcceptancePackage,
-  buildDelegationPrompt,
   buildMarkdownExport,
-  buildVerifySchema,
   createReceipt,
-  delegationRoundKind,
-  delegationRoundNumber,
   deriveCurrentStatuses,
   nextCriterionId,
-  normalizeDelegatedResult,
   staleInLatestRound,
   summarizeCounts,
   validateEvidence,
   validateReceipt,
 } from './domain.js'
 import { ReceiptStore, defaultRoot } from './store.js'
+import { TOOL_NAMES, buildAcceptanceTools } from './tools.js'
+import { createVerificationRunner } from './verification.js'
 
 export const name = 'dsh-acceptance'
 
@@ -111,14 +108,89 @@ export function apply(ctx, config = {}) {
   // 代价是「模式 A 不可用」，而不是「验收台全灭」（SDD §1.3、决策 D-016）。
   let subagents = null
   let agents = null
+  let sessions = null
   ctx.inject(['subagents'], (scoped) => {
     subagents = scoped.subagents
+    // 可核对的运行时事实：这个回调什么时候跑、拿到了什么。缺了它就只剩「不可委派」一句，
+    // 而真因（回调没跑 / 服务为空 / 只挂了 provider 却没有 start）全被吞掉 —— 2026-10-12 真机就踩了这个。
+    console.log(`[dsh-acceptance] subagents 作用域就绪：list()=${JSON.stringify(subagents?.list?.() ?? null)}`)
   })
   ctx.inject(['agents'], (scoped) => {
     agents = scoped.agents
   })
 
+  /**
+   * 模式 A 的委派执行体（SDD §5、§14）—— **路由与模型可调用工具共用这一条**。
+   *
+   * ⚠️ 它必须在 `apply` 作用域上建，不能在下面那条 `inject` 回调里建：
+   * `ctx.inject(['tools'], …)` 与 `ctx.inject(['connection','sessions'], …)` 是两个同级的
+   * 注册，**回调顺序不保证**。建成「工具回调里调用一个还没赋值的函数」在真机上表现为
+   * 「工具一调就崩」，而单测里因为两个回调顺序恰好正确而全绿。
+   */
+  const { runVerification } = createVerificationRunner({
+    store,
+    subagents: () => subagents,
+    agents: () => agents,
+  })
+
+  /**
+   * 解析本轮变更范围（S5 §3）。
+   *
+   * ⚠️ 三条硬限制决定了这里**只能**返回三种不同的「空」：
+   *  - `no-turn-recorded`  —— 父会话里根本没有 `workspace/changes` 事件；
+   *  - `summary-unavailable` —— 有事件但宿主重启过/会话已销毁，摘要在内存里没落盘；
+   *  - `workspace-changes` 且 `files: []` —— 确实没改，或无 git 仓库时 bash 改动不录。
+   * 界面必须把这三句说成不同的话（L0 §10 第 10 条）。
+   */
+  const resolveChangedFiles = (sessionId) => {
+    const empty = (source) => ({ files: [], source })
+    if (!sessionId) return empty('no-session')
+    const session = sessions?.get?.(sessionId)
+    if (!session) return empty('no-session')
+    const events = Array.isArray(session.events)
+      ? session.events
+      : typeof session.snapshotEvents === 'function'
+        ? session.snapshotEvents()
+        : []
+    let latest = null
+    for (const event of events) {
+      if (event?.type === 'workspace/changes') latest = event
+    }
+    if (!latest) return empty('no-turn-recorded')
+    const service = workspaceChanges
+    if (!service?.summary) return empty('summary-unavailable')
+    const summary = service.summary(sessionId, latest.seq)
+    if (!summary) return empty('summary-unavailable')
+    return {
+      files: (summary.files ?? []).map((file) => file?.path).filter((path) => typeof path === 'string'),
+      source: 'workspace-changes',
+    }
+  }
+
+  // 模型可调用工具（SDD §14）。`tools` **单独 inject** —— 并进上面那条 inject 的话，
+  // 9 条路由的可用性就绑死在 tools 服务上；一个工具没接上不该让整个界面跟着消失。
+  // 注册失败要**响亮**，不许静默跳过（一个没注册上的工具在模型看来等于不存在）。
+  ctx.inject(['tools'], (scoped) => {
+    try {
+      const tools = buildAcceptanceTools({
+        store,
+        runVerification: (input) => runVerification(input),
+        resolveChangedFiles,
+        warn: (line) => ctx.logger?.warn?.(line) ?? console.warn(line),
+      })
+      for (const tool of tools) scoped.tools.register(tool)
+      // 与其它插件同样的口径：注册成功留下一行**可核对的事实**。真机验收靠它确认
+      // 「跑着的进程里真的有这个工具」，而不是靠重启后的印象。
+      console.log(`[dsh-acceptance] agent tools ready: ${TOOL_NAMES.join(', ')}`)
+    } catch (error) {
+      console.error('[dsh-acceptance] 工具注册失败，模型将看不到这些能力：', error)
+    }
+  })
+
   ctx.inject(['connection', 'sessions'], (scoped) => {
+    // `sessions` 供上面的 `resolveChangedFiles` 用（它建在 `apply` 作用域上，因为工具回调
+    // 与这条回调的**执行顺序不保证**）。
+    sessions = scoped.sessions
     const deps = {
       store,
       root,
@@ -128,40 +200,6 @@ export function apply(ctx, config = {}) {
       workspaceChanges: () => workspaceChanges,
       subagents: () => subagents,
       agents: () => agents,
-    }
-
-    /**
-     * 解析本轮变更范围（S5 §3）。
-     *
-     * ⚠️ 三条硬限制决定了这里**只能**返回三种不同的「空」：
-     *  - `no-turn-recorded`  —— 父会话里根本没有 `workspace/changes` 事件；
-     *  - `summary-unavailable` —— 有事件但宿主重启过/会话已销毁，摘要在内存里没落盘；
-     *  - `workspace-changes` 且 `files: []` —— 确实没改，或无 git 仓库时 bash 改动不录。
-     * 界面必须把这三句说成不同的话（L0 §10 第 10 条）。
-     */
-    const resolveChangedFiles = (sessionId) => {
-      const empty = (source) => ({ files: [], source })
-      if (!sessionId) return empty('no-session')
-      const session = deps.sessions?.get?.(sessionId)
-      if (!session) return empty('no-session')
-      const events = Array.isArray(session.events)
-        ? session.events
-        : typeof session.snapshotEvents === 'function'
-          ? session.snapshotEvents()
-          : []
-      let latest = null
-      for (const event of events) {
-        if (event?.type === 'workspace/changes') latest = event
-      }
-      if (!latest) return empty('no-turn-recorded')
-      const service = deps.workspaceChanges()
-      if (!service?.summary) return empty('summary-unavailable')
-      const summary = service.summary(sessionId, latest.seq)
-      if (!summary) return empty('summary-unavailable')
-      return {
-        files: (summary.files ?? []).map((file) => file?.path).filter((path) => typeof path === 'string'),
-        source: 'workspace-changes',
-      }
     }
 
     const route = (path, methods, handler) => {
@@ -302,151 +340,42 @@ export function apply(ctx, config = {}) {
     //  - **承诺之后**（启动失败 / 执行失败 / 超时 / 没返回结构化结果 / 结果不合法）
     //    ⇒ **写一轮 `blocked`**，`producedBy: 'agent'`。这一轮是「一次真的发生过的委派取证」的记录，
     //      用户下次打开凭证能看到「试过、卡在哪」。转瞬即逝的错误提示做不到这件事（SDD §5.5）。
+    // --- 模式 A：委派子 Agent 取证（SDD §5） ---------------------------------
+    //
+    // 失败分两类，判据是**是否已经承诺要委派**（即是否已经走过 `runtime.start()` 那一行）：
+    //  - **承诺之前**（没有 subagents 服务 / 会话没有活着的 Agent / provider 不存在 / 没有验收项）
+    //    ⇒ 4xx。用户就在屏幕前，当场告诉他就够了，不该在凭证里留一条无意义的轮次。
+    //  - **承诺之后**（启动失败 / 执行失败 / 超时 / 没返回结构化结果 / 结果不合法）
+    //    ⇒ **写一轮 `blocked`**，`producedBy: 'agent'`。这一轮是「一次真的发生过的委派取证」的记录，
+    //      用户下次打开凭证能看到「试过、卡在哪」。转瞬即逝的错误提示做不到这件事（SDD §5.5）。
+    //
+    // v0.2.0：逻辑搬进 `verification.js` —— 模型可调用工具的提交入口必须走**同一条**路径，
+    // 两份实现会各自演化成「工具说已提交、界面说还在开发中」两套真相（SDD §14.1）。
     route('/api/acceptance.verify', ['POST'], async (request, query) => {
       const body = await readJson(request)
       const taskId = requireString(body.taskId ?? query.get('taskId'), 'taskId')
-      const receipt = await store.read(taskId)
-      if (!receipt) return sendJson({ ok: false, error: `没有任务 ${taskId}` }, 404)
-
-      const active = (receipt.criteria ?? []).filter((criterion) => criterion && !criterion.deletedAt)
-      if (active.length === 0) {
-        return sendJson({ ok: false, error: '这个任务还没有验收项 —— 先确认验收项，再委派取证' }, 400)
-      }
-
       const sessionId = requireString(body.sessionId ?? query.get('sessionId'), 'sessionId')
 
-      const runtime = deps.subagents()
-      if (!runtime?.start) {
-        return sendJson({ ok: false, error: '宿主没有 subagents 服务 —— 模式 A 不可用，请走模式 B（验收包 → 导入）' }, 400)
-      }
-
-      // 路由处理器没有工具层的 `exec.agent`，只能按 sessionId 去 AgentRegistry 里查**活着的**那个。
-      // 宿主重启后内存里的 Agent 就没了 ⇒ 这里必须给出可照做的下一步，而不是一句「失败了」。
-      const parent = deps.agents()?.get?.(sessionId)
-      if (!parent) {
-        return sendJson(
-          {
-            ok: false,
-            error: `会话 ${sessionId} 没有活着的 Agent —— 宿主重启后需要先恢复该会话；或改走模式 B（验收包 → 导入）`,
-          },
-          409,
-        )
-      }
-
-      const provider = typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : 'spawn'
-      if (typeof runtime.list === 'function' && !runtime.list().includes(provider)) {
-        const available = (runtime.list() ?? []).join(', ') || '无'
-        return sendJson({ ok: false, error: `宿主没有名为 ${provider} 的委派 provider（现有：${available}）` }, 400)
-      }
-
-      /** 写一轮 blocked。**不解析 `output` 自由文本** —— 从自然语言里猜结论会把「未验证」污染成「通过」。 */
-      const writeBlockedRound = async (reason, provenance) => {
-        const now = new Date().toISOString()
-        const appended = appendRound(receipt, {
-          round: delegationRoundNumber(receipt),
-          kind: delegationRoundKind(receipt),
-          startedAt: now,
-          finishedAt: now,
-          producedBy: 'agent',
-          provenance: provenance ?? null,
-          blockedReason: reason,
-          evaluations: [],
-        })
-        if (appended.errors.length > 0) return sendJson({ ok: false, errors: appended.errors }, 400)
-        await store.write(appended.receipt)
-        return sendJson({ ok: true, blocked: true, reason, receipt: appended.receipt })
-      }
-
-      const disposeQuietly = async (run) => {
-        try {
-          await run?.dispose?.()
-        } catch {
-          // 清理失败不该盖掉已经拿到的结论
-        }
-      }
-
-      const timeoutMs = Number.isInteger(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : 600000
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(new Error('验收超时')), timeoutMs)
-      const startedAt = new Date().toISOString()
-
-      // ---- 承诺点：这一行之后的一切失败都写 blocked 轮次，不再返回 4xx ----
-      let run
-      try {
-        run = await runtime.start(provider, {
-          label: `验收 ${taskId}`,
-          prompt: [{ type: 'text', text: buildDelegationPrompt(receipt) }],
-          parent,
-          signal: controller.signal,
-          outputSchema: buildVerifySchema(receipt.criteria),
-          agentOptions:
-            Number.isInteger(body.maxTokens) && body.maxTokens > 0 ? { maxTokens: body.maxTokens } : undefined,
-        })
-      } catch (error) {
-        clearTimeout(timer)
-        return writeBlockedRound(`委派启动失败：${String(error?.message ?? error)}`, { provider, phase: 'start' })
-      }
-
-      let result
-      try {
-        result = await run.result
-      } catch (error) {
-        clearTimeout(timer)
-        await disposeQuietly(run)
-        return writeBlockedRound(`委派执行失败：${String(error?.message ?? error)}`, { provider, phase: 'run' })
-      }
-      clearTimeout(timer)
-      await disposeQuietly(run)
-
-      const finishedAt = new Date().toISOString()
-      const provenance = {
-        provider,
-        runId: run?.id ?? null,
-        stopReason: result?.stopReason ?? null,
+      const outcome = await runVerification({
+        taskId,
         parentSessionId: sessionId,
-        diagnostic: result?.diagnostic ?? null,
-        // 版本指纹首版**恒 null**（L0 §10 第 9 条、S5）：拿不到就写 null = 「版本未知」，
-        // 不许用变更文件列表派生哈希冒充。
-        fingerprint: null,
-      }
-
-      if (result?.structured === undefined) {
-        // SDD §5.2 第 2 步：**不去解析 `output` 文本**。
-        return writeBlockedRound(
-          `委派没有返回结构化结果（stopReason=${String(result?.stopReason)}）—— 不解析自由文本，这一轮记为被阻塞`,
-          provenance,
-        )
-      }
-
-      const normalized = normalizeDelegatedResult(receipt, result.structured, { startedAt, finishedAt })
-      if (normalized.errors.length > 0) {
-        // 子 Agent 给了结果但不合契约 ⇒ 仍然写 blocked，把逐条错误原样写进 blockedReason。
-        // **不部分写入**（SDD §5.2 第 3 步），也不丢掉「真的跑过一次」这个事实。
-        return writeBlockedRound(
-          `委派结果不合法，一条结论都没写入：\n- ${normalized.errors.join('\n- ')}`,
-          provenance,
-        )
-      }
-
-      const merged = { ...receipt, evidence: [...receipt.evidence, ...normalized.evidence], updatedAt: finishedAt }
-      const appended = appendRound(merged, {
-        round: normalized.round,
-        kind: delegationRoundKind(receipt),
-        startedAt,
-        finishedAt,
-        producedBy: 'agent',
-        provenance,
-        blockedReason: null,
-        evaluations: normalized.evaluations,
+        provider: typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined,
+        timeoutMs: body.timeoutMs,
+        maxTokens: body.maxTokens,
+        resolveChangedFiles,
       })
-      if (appended.errors.length > 0) return sendJson({ ok: false, errors: appended.errors }, 400)
 
-      const check = validateReceipt(appended.receipt)
-      if (!check.ok) return sendJson({ ok: false, errors: check.errors }, 400)
-
-      await store.write(appended.receipt)
-      return sendJson({ ok: true, receipt: appended.receipt })
+      // `error` = 承诺点之前 ⇒ 4xx 且一条轮次都不写（用户就在屏幕前，当场说清就够了）。
+      if (outcome.outcome === 'error') {
+        return sendJson({ ok: false, error: outcome.message }, outcome.httpStatus)
+      }
+      // `blocked` = 承诺点之后 ⇒ 仍然 200，但体上标明 `blocked: true`，凭证里已落一轮阻塞。
+      if (outcome.outcome === 'blocked') {
+        return sendJson({ ok: true, blocked: true, reason: outcome.message, receipt: outcome.receipt })
+      }
+      return sendJson({ ok: true, receipt: outcome.receipt })
     })
+
 
     // --- 模式 B：生成验收包 --------------------------------------------------
     route('/api/acceptance.package', ['POST'], async (request) => {

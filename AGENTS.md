@@ -16,13 +16,16 @@
 ```
 src/dsh/host/index.js     apply(ctx, config) + 9 条路由 + 会话上下文读取
 src/dsh/host/domain.js    纯函数域（无 I/O、无 ctx、无模型）—— 所有判定都在这儿
+src/dsh/host/verification.js 模式 A 的委派执行体（**路由与工具共用这一条**，回信封不认识 HTTP）
+src/dsh/host/tools.js     模型可调用工具（begin_task / submit_delivery / get_result）
 src/dsh/host/store.js     凭证存储（原子写）
 src/dsh/client/client.js  单文件 CommonJS + React（浏览器侧；样式里的设计 Token 由 sync-tokens.mjs 整块内联）
 scripts/build-client.mjs  打包 + external 漂移检查 + 源码哈希 stamp
-scripts/verify-project.mjs 守卫 G1–G11
+scripts/verify-project.mjs 守卫 G1–G22
 design/tokens.css          UI 设计 Token 快照（真源是跨项目 skill dsh-plugin-ui）
 test/gate.test.mjs        域逻辑行为断言（node --test）
 test/host.test.mjs        宿主半集成断言（假 ctx 真挂 apply，验路由与状态码）
+test/tool-output.test.mjs  工具**输出**契约断言（复刻真机输出校验：每工具的每条返回路径都过一遍）
 test/client-bundle.test.mjs 客户端**产物**行为断言（真跑 __ModuleLoader__ 收下的 factory + 真渲染）
 dist/client.js            发布产物，提交进仓库
 ```
@@ -74,8 +77,8 @@ dist/client.js            发布产物，提交进仓库
 ## 6. 守卫与自检
 
 ```bash
-node scripts/verify-project.mjs   # G1–G11，11/11 才算过
-npm test                          # pretest 会先重建客户端；77 个行为断言（gate 14 + host 30 + client 33）
+node scripts/verify-project.mjs   # G1–G22，22/22 才算过
+npm test                          # pretest 会先重建客户端；95 个行为断言（gate 14 + host 43 + tool-output 5 + client 33）
 ```
 
 | 守卫 | 钉住什么 |
@@ -91,6 +94,22 @@ npm test                          # pretest 会先重建客户端；77 个行为
 | G9 | 委派 `outputSchema` 只用宿主白名单关键字、根是 object、`id` 的 enum 恰是未删除项 |
 | G10 | 客户端调用到的每条 `/api/acceptance.*` 路由，宿主半都注册过（跨半契约） |
 | G11 | 设计 Token：消费方的 Token 块与 `design/tokens.css` 逐字一致、块外零裸色值、字号/圆角都在尺度表内 |
+| **G12** | 工具的 `parameters` **与** `output.schema` 都只用真机快照允许的关键字，**且每个工具都必须有 `output { schema, render }`** |
+| — | G9/G12 的白名单来源 = `design/dsh-tool-schema-rules.json`（真机快照）；**过期核对**跑 `npm run verify:schema`（要运行时；分叉即 exit 1） |
+| **G13** | 工具层不写 `requirementText`（除建任务那一次）、不写 `decision`、不替用户确认验收项 |
+| **G14** | 工具的 `parameters` 里不出现 `sessionId` / `workspace` / `cwd` —— 身份只能来自 `exec.agent` |
+| **G15** | 返修项必须带 `evidenceIds` 或 `unverifiedReason`（12 条反例含 7 条必须被拒） |
+| **G16** | 五态显示名各自不同、与评审定稿逐字一致，且客户端与导出同一套词（**不许两态同名**） |
+| **G17** | 三轴不合并：顶层无 `status`；结论态仍在 `evaluations[]`；运行态不与五态字面量重叠 |
+| **G18** | 自动返修上限恰为 2 轮；到限后必须要求人类决定 |
+| **G19** | 工具引导节若存在，其 `text()` 必须先查 `ctx.tools.get(name, agent)`（尚未装 ⇒ 明说未做） |
+| **G20** | 工具边界不抛：无 Agent 上下文 / 非法参数 / 没有委派服务，三条都回信封 |
+| **G21** | 委派用真机的 `startActivation(spec)` / 回执读 `childId` / `spec.signal` 必给；**假运行时必须同形状** |
+| **G22** | 委派提示词把五类 `locator` 的**确切格式**写给验收 Agent（与校验器同步） |
+
+**「守卫全绿」不等于「守卫在跑」。** G16 首版就是**空转**的：它只查五个词「都出现过」，于是把
+`blocked: '未通过'`（把环境阻塞合并进未通过）判成通过。**加规则时顺手把「它会红」也演一遍** ——
+把违规写进源码、看它 FAIL、再还原。2026-10-12 逐条演过 G13/G14/G15/G16/G18 都会红。
 
 **UI 设计 Token 的真源不在本仓库** —— 它是跨项目的 skill `dsh-plugin-ui`（本机 `~/.agents/skills/dsh-plugin-ui`，symlink）。
 本仓库的 `design/tokens.css` 只是快照；两个消费方（原型 Demo + `src/dsh/client/client.js`）都用该 skill 的
@@ -153,12 +172,12 @@ G11 会把四件事变红：快照落后于真源、内联副本被手改、Toke
 
 ### 8.2 模式 A（`.verify`）：以「承诺点」分层的失败处置
 
-`runtime.start()` 那一行就是**承诺点**。它之前失败 ⇒ 4xx 且**一条轮次都不写**；之后失败 ⇒ **写一轮 `blocked`**、
+`ctx.subagents.startActivation(spec)` 那一行就是**承诺点**。它之前失败 ⇒ 4xx 且**一条轮次都不写**；之后失败 ⇒ **写一轮 `blocked`**、
 HTTP **仍 200** 且带 `blocked: true`（决策记录 D-018）。
 
 | 位置 | 具体失败 | 处置 |
 |---|---|---|
-| 之前 | 没有 `subagents` 服务 / `ctx.agents.get(sessionId)` 给 `undefined` / provider 不在 `runtime.list()` / 没有未删除的验收项 | **4xx**，不写轮次 |
+| 之前 | 没有可用的 `startActivation` / `ctx.agents.get(sessionId)` 给 `undefined` / provider 不在 `runtime.list()` / 没有未删除的验收项 | **4xx**，不写轮次 |
 | 之后 | 启动抛 / 执行 reject / 超时 / `structured === undefined` / 规范化有错 / `appendRound` 或 `validateReceipt` 失败 | **`blocked` 轮次**（`evaluations: []`，`provenance.phase` 记 `'start'`/`'run'`），200 |
 
 - **绝不解析 `output` 自由文本。** `structured === undefined` 时，那段文字写得再确定也记 `blocked` ——
@@ -275,12 +294,15 @@ ln -sfn "../../../../DeepSeek Harness Native/14_Agent 交付验收台/acceptance
 ## 12. 还没做的
 
 - `.repairs`（生成返修任务）—— SDD §9 十条路由里**唯一**还没实现的一条。
+  v0.2.0 已把它的**契约与校验**做完（`validateRepairItem`，守卫 G15；轮次上限 `DEFAULT_ROUND_LIMIT = 2`，G18），
+  但**路由与工具回传还没接**。
 - **客户端已把宿主 9 条路由全消费**（守卫 G10 的 detail 会打出实况；`client-bundle.test.mjs` 另有一条断言
   `ROUTE` 恰 9 条 —— 将来加一条宿主路由而客户端没接，它会红）。
-- `buildVerifySchema` / `buildDelegationPrompt` / `normalizeDelegatedResult` **还没有单独的纯函数反例测试**，
-  目前只被 `host.test.mjs` 的模式 A 用例间接覆盖。
+- `buildVerifySchema` / `normalizeDelegatedResult` **还没有单独的纯函数反例测试**，目前只被 `host.test.mjs` 的模式 A 用例间接覆盖。
+  （`buildDelegationPrompt` 自 G22 起有守卫：提示词必须写全五类 locator 的确切格式 —— 真机连废四轮就是因为它没写。）
 - **模式 A 的委派本体已在真机验过**（§6 末尾那段 + 该 README §8），包括「承诺点之前 4xx 渲染成错误条」与
-  「真委派 ⇒ 落一轮带证据」。还没做的是把它放进 PRD §7 的 dogfood：用**一条真需求**跑完整流程并记 7 指标 / 5 信号。
+  「真委派 ⇒ 落一轮带证据」。**v0.2.0 的工具触发链路已在真机端到端验过**（2026-10-12，S6 README §1.9）。
+  还没做的是把它放进 PRD §7 的 dogfood：用**一条真需求**跑完整流程并记 7 指标 / 5 信号。
 - `scope.fingerprint` 首版恒为 `null`（「版本未知」）。**不许**用变更文件列表派生哈希冒充。
 - 变更范围只有父（开发）会话读得到；子会话不记录、摘要只在宿主内存。三种「空」必须是三句不同的话。
 - S3b/S3c/S3d 探针（不阻塞开发）。

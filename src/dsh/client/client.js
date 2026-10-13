@@ -80,6 +80,10 @@ const ZH = {
   methodCommand: '跑命令',
   methodUi: '看界面',
   confirmCriterion: '确认验收标准',
+  confirmAll: '全部确认',
+  confirmAllHint: '一次确认这个任务里所有还没确认的验收项。确认过的不会被改动。',
+  confirmNowHint: '确认之前，这一项不算契约，也不会被取证。',
+  unconfirmedNote: '这一项还没确认 —— 未确认的范围不是契约。',
   confirmedAt: '已确认',
   deleteCriterion: '删除',
   promptTitle: '验收项整理提示词',
@@ -164,6 +168,8 @@ const ZH = {
   verifyAlternative: '可以改用「我已经有检查结果」：生成验收包，在外部完成检查后再导入。',
   verifyPending: '条待取证',
   stepLabel: '下一步',
+  stepConfirmFirst: '先确认验收标准 —— 还有验收项没确认，确认之前不会取证。',
+  verifyNeedsConfirm: '还有验收项没确认，先确认再取证。',
   stepNoEvidence: '先开始验证，当前还没有可供判断的证据。',
   stepPending: '还有验收项没有结论。',
   stepUnknown: '证据还不足以判断。请补充验证或人工核对。',
@@ -238,6 +244,10 @@ const EN = {
   methodCommand: 'Run a command',
   methodUi: 'Inspect the UI',
   confirmCriterion: 'Confirm the pass condition',
+  confirmAll: 'Confirm all',
+  confirmAllHint: 'Confirms every not-yet-confirmed item in this task. Already confirmed items are left alone.',
+  confirmNowHint: 'Until you confirm it, this item is not a contract and will not be verified.',
+  unconfirmedNote: 'This item is not confirmed yet — an unconfirmed scope is not a contract.',
   confirmedAt: 'Confirmed',
   deleteCriterion: 'Delete',
   promptTitle: 'Items-organising prompt',
@@ -322,6 +332,8 @@ const EN = {
   verifyAlternative: 'You can use "I already have check results" instead: generate the package, check externally, then import.',
   verifyPending: 'item(s) to verify',
   stepLabel: 'Next step',
+  stepConfirmFirst: 'Confirm the pass conditions first — some items are still unconfirmed, and nothing is verified before that.',
+  verifyNeedsConfirm: 'Some items are still unconfirmed — confirm them before verifying.',
   stepNoEvidence: 'Start verifying — there is no evidence to judge yet.',
   stepPending: 'Some acceptance items still have no conclusion.',
   stepUnknown: 'The evidence is not enough to judge. Add verification or check it by hand.',
@@ -492,6 +504,8 @@ body[data-ds-dark-theme]{
   '.acc-eyebrow{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-family:var(--dui-mono);font-size:11px;color:var(--dui-fg-3)}',
   '.acc-detail-title{font-size:15px;font-weight:600;color:var(--dui-fg);margin:5px 0 6px;line-height:1.45}',
   '.acc-statucline{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;color:var(--dui-fg-2);font-size:12px}',
+  // P0-1：确认动作前置后所在的那一行。它紧贴状态行，故上边距小、与状态行区分靠左边一条细线。
+  '.acc-confirmline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 0;padding-left:8px;border-left:2px solid var(--dui-accent);font-size:12px}',
   '.acc-plain{border-left:2px solid var(--dui-line-2);padding:2px 0 2px 11px;white-space:pre-wrap;line-height:1.6}',
   '.acc-fold{border-top:1px solid var(--dui-line);margin-top:14px;padding-top:10px}',
   '.acc-fold>summary{cursor:pointer;color:var(--dui-fg-2);font-size:12.5px}',
@@ -815,7 +829,7 @@ function CriterionList(props) {
  * 「这项是否符合要求」在 JudgementBlock 里，紧跟在证据之后。
  */
 function DetailPane(props) {
-  const { criterion, receipt, status, stale, t } = props
+  const { criterion, receipt, status, stale, t, busy, onConfirm } = props
   if (!criterion) {
     return React.createElement('div', { className: 'acc-note' }, t('emptyBody'))
   }
@@ -845,6 +859,17 @@ function DetailPane(props) {
       React.createElement(StatusBadge, { status }),
       React.createElement('span', { className: 'acc-muted' }, statusHint(status)),
     ),
+    // P0-1（2026-10-12）：确认动作**前置到顶部**，紧跟在状态标签后面。
+    // 用户走查原话：「确认验收标准」埋在面板最底部，几乎不可发现 —— 两个真实任务都卡在 0 确认。
+    // 未确认时它是这个页面**唯一该做**的动作，所以它必须和状态标签在同一屏、不用滚动就能看到。
+    criterion.confirmedByUserAt
+      ? null
+      : React.createElement(
+          'div',
+          { className: 'acc-confirmline' },
+          React.createElement(Btn, { primary: true, disabled: busy, onClick: () => onConfirm(criterion.id) }, t('confirmCriterion')),
+          React.createElement('span', { className: 'acc-muted' }, t('confirmNowHint')),
+        ),
     React.createElement('div', { className: 'acc-hd' }, t('standard')),
     criterion.expected
       ? React.createElement('div', { className: 'acc-plain' }, criterion.expected)
@@ -927,8 +952,12 @@ function shortTime(value) {
  * 这不是判定 —— 它不决定任何验收项是什么状态，只把宿主已经算好的计数翻成人话
  * （方案 v0.1.2 §5.5）。所以它拿的是 `derived.counts`，不是它自己数的东西。
  *
- * 优先级（从上到下，第一个命中就返回）：一条证据都没有 → fail → blocked → unknown → pending
- * → 全 pass。有结论的项优先于没结论的项：先说要处理什么，再说还缺什么。
+ * 优先级（从上到下，第一个命中就返回）：**有未确认项 → 先确认** → 一条证据都没有 → fail → blocked
+ * → unknown → pending → 全 pass。有结论的项优先于没结论的项：先说要处理什么，再说还缺什么。
+ *
+ * P0-2（2026-10-12）：**「先确认」排在最前面**。用户走查原话：未确认时界面仍引导直接取证。
+ * 未确认的范围不是契约（取证路径也只对它工作），所以这一步是**当前唯一该做的动作**，
+ * 任何取证类提示在它面前都是错的方向。
  */
 function nextStepHint(counts, options) {
   const at = (key) => Math.max(0, Number(counts?.[key]) || 0)
@@ -939,6 +968,8 @@ function nextStepHint(counts, options) {
   const blocked = at('blocked')
   const evidenceCount = Math.max(0, Number(options?.evidenceCount) || 0)
   const total = pending + pass + fail + unknown + blocked
+  const unconfirmed = Math.max(0, Number(options?.unconfirmedCount) || 0)
+  if (unconfirmed > 0) return 'stepConfirmFirst'
   if (total > 0 && pass === 0 && (fail + unknown + blocked) === 0 && evidenceCount === 0) return 'stepNoEvidence'
   if (fail > 0) return 'stepFail'
   if (blocked > 0) return 'stepBlocked'
@@ -1159,13 +1190,15 @@ function CriterionActions(props) {
   return React.createElement(
     'div',
     { className: 'acc-row' },
+    // P0-1：确认动作只在**顶部**有一个入口（`DetailPane` 的 `acc-confirmline`）。
+    // 这里不再放第二个确认按钮 —— 两个入口会各说各话；未确认时给一句指路。
     criterion.confirmedByUserAt
       ? React.createElement(
           'span',
           { className: 'acc-muted' },
           `${t('confirmedAt')} · ${shortTime(criterion.confirmedByUserAt)}`,
         )
-      : React.createElement(Btn, { onClick: () => onConfirm(criterion.id), disabled: busy }, t('confirmCriterion')),
+      : React.createElement('span', { className: 'acc-warn' }, t('unconfirmedNote')),
     React.createElement(Btn, { onClick: () => onDelete(criterion.id), disabled: busy }, t('deleteCriterion')),
   )
 }
@@ -1407,9 +1440,13 @@ function JudgementBlock(props) {
  * 它会在点击后由宿主用自己的原文拒绝（不写轮次），并且旁边始终写着替代路径。
  */
 function ReverifyButton(props) {
-  const { t, busy, sessionId, activeCount, onVerify, delegateAvailable } = props
+  const { t, busy, sessionId, activeCount, onVerify, delegateAvailable, unconfirmedCount } = props
   const blocked = !sessionId
   const empty = activeCount === 0
+  // P0-2（2026-10-12）：**还有未确认项 ⇒ 取证入口不可点**，并在旁边说清为什么。
+  // 依据是取证路径的**真实行为**（P0-3 统一后的规则：只对已确认项取证）——
+  // 这条禁用不是界面自己发明的规矩，而是把宿主那条规则的**前置条件提前说出来**。
+  const needsConfirm = Math.max(0, Number(unconfirmedCount) || 0) > 0
   // §5.4 第三条前置：宿主说「现在没有委派能力」时，**在动作之前**说清原因与替代路径。
   // 取值来自 `.health` 的 `capabilities.delegate`；老版本宿主没这个字段 = 未知 ⇒ **不拦**
   // （不能把「不知道」显示成「不可用」，那会冤枉一个本来能跑的宿主）。
@@ -1424,13 +1461,16 @@ function ReverifyButton(props) {
       { className: 'acc-row' },
       React.createElement(
         Btn,
-        { primary: true, disabled: blocked || empty || unsupported || busy, onClick: () => onVerify() },
+        { primary: true, disabled: blocked || empty || unsupported || needsConfirm || busy, onClick: () => onVerify() },
         busy ? t('verifying') : t('verifyMain'),
       ),
       React.createElement('span', { className: 'acc-muted' }, t('verifyMainNote')),
     ),
     blocked ? React.createElement('div', { className: 'acc-note' }, t('verifyNoSession')) : null,
     !blocked && empty ? React.createElement('div', { className: 'acc-note' }, t('verifyNoCriteria')) : null,
+    !blocked && !empty && needsConfirm
+      ? React.createElement('div', { className: 'acc-note' }, t('verifyNeedsConfirm'))
+      : null,
     unsupported ? React.createElement('div', { className: 'acc-note' }, t('verifyNoCapability')) : null,
     blocked || empty || unsupported
       ? React.createElement('div', { className: 'acc-muted' }, t('verifyAlternative'))
@@ -1655,6 +1695,23 @@ function Workbench(props) {
   const addCriterion = React.useCallback((criterion) => sendOps([{ op: 'add', criterion }]), [sendOps])
   const confirmCriterion = React.useCallback((id) => sendOps([{ op: 'confirm', id }]), [sendOps])
   const deleteCriterion = React.useCallback((id) => sendOps([{ op: 'delete', id }]), [sendOps])
+  /**
+   * P0-1（2026-10-12）：「全部确认」。
+   *
+   * ⚠️ **它必须是 Hooks 规则里的「无条件调用」** —— 也就是必须排在那两个 early return**之前**。
+   * 第一版我把它放在了 early return 之后（因为那里才有 `criteria`），真机直接崩：
+   * 首屏 `loading=true` 走提前返回（少调一个 hook），health 到位后重渲染多调一个 ⇒
+   * React error 310 `Rendered more hooks than during the previous render`，**整个验收台视图白屏**。
+   * 静态渲染单测看不见它（单次渲染不比较 hook 数）—— 所以这里改成从 `detail` 自己取，
+   * 不再依赖 early return 之后才有的 `criteria`，并且位置锁在其它 hook 旁边。
+   */
+  const unconfirmedFromReceipt = (detail?.receipt?.criteria ?? [])
+    .filter((item) => !item.deletedAt && !item.confirmedByUserAt)
+    .map((item) => item.id)
+  const confirmAllUnconfirmed = React.useCallback(() => {
+    if (unconfirmedFromReceipt.length === 0) return Promise.resolve(true)
+    return sendOps(unconfirmedFromReceipt.map((id) => ({ op: 'confirm', id })))
+  }, [sendOps, unconfirmedFromReceipt.join(',')])
 
   const makePackage = React.useCallback(() => run(() => io.postText(ROUTE.package, { taskId })), [run, taskId])
 
@@ -1811,8 +1868,12 @@ function Workbench(props) {
   const stale = new Set(derived?.stale ?? [])
   const counts = derived?.counts ?? {}
   const evidenceCount = Array.isArray(receipt?.evidence) ? receipt.evidence.length : 0
+  // P0-2（2026-10-12）：**未确认项集合**。它同时决定「下一步说什么」与「取证入口能不能点」——
+  // 两处必须读同一个来源，否则又会出现「提示说可以取证、按钮却禁用」这种自相矛盾。
+  const unconfirmedIds = criteria.filter((item) => !item.confirmedByUserAt).map((item) => item.id)
+
   // §5.5 的下一步指引：输入是**宿主派生的 counts**，客户端只把它翻成一句人话。
-  const stepHint = nextStepHint(counts, { evidenceCount })
+  const stepHint = nextStepHint(counts, { evidenceCount, unconfirmedCount: unconfirmedIds.length })
   const hasTasks = tasks.length > 0
   // §5.1：没有任务 = 开始页；有任务但没选中 = 「选择一个任务继续」。两句不同的话。
   const onboard = receipt ? null : hasTasks ? 'pickOne' : 'empty'
@@ -1907,6 +1968,20 @@ function Workbench(props) {
               { className: 'acc-list-head' },
               React.createElement('span', { className: 'acc-list-title' }, t('listHead')),
               React.createElement('span', { className: 'acc-list-count' }, `${visible.length} / ${criteria.length} ${t('itemUnit')}`),
+              // P0-1：任务级批量确认。**只在真有未确认项时出现** —— 常驻会让它变成噪声，
+              // 而「没有待确认的东西」时它本来就无事可做。
+              unconfirmedIds.length > 0
+                ? React.createElement(
+                    Btn,
+                    {
+                      primary: true,
+                      disabled: busy,
+                      onClick: () => confirmAllUnconfirmed(),
+                      title: t('confirmAllHint'),
+                    },
+                    `${t('confirmAll')}（${unconfirmedIds.length}）`,
+                  )
+                : null,
             ),
             React.createElement('input', {
               className: 'acc-search',
@@ -1950,9 +2025,12 @@ function Workbench(props) {
                     status: statusOf(focused),
                     stale,
                     t,
+                    busy,
+                    onConfirm: confirmCriterion,
                   }),
                   React.createElement(ReverifyButton, {
                     t,
+                    unconfirmedCount: unconfirmedIds.length,
                     busy,
                     sessionId,
                     activeCount: criteria.length,

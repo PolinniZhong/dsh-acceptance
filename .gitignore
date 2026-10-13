@@ -8,3 +8,6 @@ npm-debug.log*
 
 # 本机私有的发布档案（跟着仓库走的那份；本机用的是 skill 的 profiles/）
 .dsh-release.json
+
+# 发布用 npm cache（档案 platform.npmCache 指向它；不进仓库）
+.npm-cache/

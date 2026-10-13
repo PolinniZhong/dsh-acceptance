@@ -829,7 +829,9 @@ test('§5.5 下一步只显示一处（不重复占地方），且一条证据�
     taskId: 't1',
     taskTitle: '健康检查',
     requirementText: '需求原文',
-    criteria: [{ id: 'AC-01', title: '健康检查 200' }],
+    // 已确认 —— 这条用例测的是「一条证据都没有」与「有证据但没结论」怎么分开说；
+    // 「未确认该提示什么」另有专条（见下面 §P0-2 那条）。
+    criteria: [{ id: 'AC-01', title: '健康检查 200', confirmedByUserAt: '2026-10-12T15:00:00.000Z' }],
     evidence: [],
     rounds: [],
     decision: null,
@@ -855,7 +857,85 @@ test('§5.5 下一步只显示一处（不重复占地方），且一条证据�
   )
   assert.ok(html.includes('先开始验证，当前还没有可供判断的证据。'), '一条证据都没有时没说「先开始验证」')
   assert.ok(html.includes('让独立 Agent 帮我验证'), '主取证入口不见了')
-  assert.ok(html.includes('确认验收标准'), '验收项的确认按钮不见了')
+  // P0-1 之后：这一项**已确认**，所以详情里不该再出现「确认验收标准」按钮
+  // （确认动作只在未确认时出现，且已前置到顶部；专条见 §P0-1）。已确认的标记要在。
+  assert.ok(!html.includes('确认验收标准'), '已确认项不该再给确认按钮')
+  assert.ok(html.includes('已确认'), '已确认的标记不见了')
+})
+
+test('P0-1：未确认时确认按钮出现在详情**顶部**（状态行之后），且清单头有批量「全部确认」', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { render } = bootOf()
+  const receipt = {
+    taskId: 't1',
+    taskTitle: '健康检查',
+    requirementText: '需求原文',
+    criteria: [{ id: 'AC-01', title: '健康检查 200' }],
+    evidence: [],
+    rounds: [],
+    decision: null,
+    scope: { cwd: '/tmp', changedFilesSource: 'no-session' },
+  }
+  const html = render({
+    tasks: [TASK],
+    taskId: 'task-1',
+    detail: {
+      receipt,
+      derived: {
+        statuses: { 'AC-01': 'pending' },
+        counts: { pending: 1, pass: 0, fail: 0, unknown: 0, blocked: 0 },
+        stale: [],
+      },
+    },
+  })
+  const atConfirm = html.indexOf('确认验收标准')
+  const atStatus = html.indexOf('acc-statucline')
+  const atJudgement = html.indexOf('这项是否符合要求？')
+  assert.ok(atConfirm > -1, '未确认时没有确认按钮')
+  assert.ok(atConfirm > atStatus, '确认按钮必须在状态行**之后**（紧邻状态标签，不是埋在底部）')
+  assert.ok(
+    atJudgement === -1 || atConfirm < atJudgement,
+    '确认按钮出现在「这项是否符合要求」之后 —— 又回到面板底部了（P0-1 要修的就是这个）',
+  )
+  assert.ok(html.includes('全部确认'), '清单头没有批量「全部确认」入口')
+})
+
+test('P0-2：未确认时「下一步」只说先确认，且取证入口是禁用的（不得引导直接取证）', (t) => {
+  if (!runtime) {
+    t.skip('DSH_ACCEPTANCE_SKIP_CLIENT_RENDER=1：按要求跳过了真实渲染')
+    return
+  }
+  const { render } = bootOf()
+  const receipt = {
+    taskId: 't1',
+    taskTitle: '健康检查',
+    requirementText: '需求原文',
+    // ⚠️ 故意**不确认**
+    criteria: [{ id: 'AC-01', title: '健康检查 200' }],
+    evidence: [],
+    rounds: [],
+    decision: null,
+    scope: { cwd: '/tmp', changedFilesSource: 'no-session' },
+  }
+  const html = render({
+    tasks: [TASK],
+    taskId: 'task-1',
+    detail: {
+      receipt,
+      derived: {
+        statuses: { 'AC-01': 'pending' },
+        counts: { pending: 1, pass: 0, fail: 0, unknown: 0, blocked: 0 },
+        stale: [],
+      },
+    },
+  })
+  assert.ok(html.includes('先确认验收标准'), '未确认时没有提示「先确认验收标准」')
+  assert.ok(!html.includes('先开始验证，当前还没有可供判断的证据。'), '未确认时仍在引导直接取证')
+  assert.ok(html.includes('还有验收项没确认，先确认再取证。'), '取证入口旁边没说清为什么不能点')
+  assert.ok(html.includes('全部确认'), '没有批量「全部确认」入口（P0-1）')
 })
 
 test('§5.6 导出与决定的用途写在按钮旁边，三个决定齐全', (t) => {

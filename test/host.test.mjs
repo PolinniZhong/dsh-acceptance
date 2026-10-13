@@ -36,6 +36,7 @@ const ROUTES = [
 /** 挂一个假 ctx；`sessions` / `subagents` / `agents` 可注入以造出各种失败路径。 */
 function mount({ sessions, subagents, agents } = {}) {
   const registered = new Map()
+  const registeredTools = new Map()
   const ctx = {
     logger: { warn() {} },
     inject(names, callback) {
@@ -54,10 +55,19 @@ function mount({ sessions, subagents, agents } = {}) {
       if (names.includes('sessions')) scoped.sessions = sessions ?? { get: () => undefined }
       if (names.includes('subagents')) scoped.subagents = subagents
       if (names.includes('agents')) scoped.agents = agents
+      // `tools` 服务：真的收下注册的工具，工具层的用例才调得到（v0.2.0）。
+      if (names.includes('tools')) {
+        scoped.tools = {
+          register(tool) {
+            if (registeredTools.has(tool.name)) throw new Error(`同一个工具注册了两次：${tool.name}`)
+            registeredTools.set(tool.name, tool)
+          },
+        }
+      }
       callback(scoped)
     },
   }
-  return { registered, ctx }
+  return { registered, registeredTools, ctx }
 }
 
 /**
@@ -73,11 +83,15 @@ function fakeSubagents({ result, resultError, startError, providers = ['spawn'] 
     calls,
     state,
     list: () => providers,
-    async start(provider, request) {
-      calls.push({ provider, request })
+    // 形状照抄**真机**：`startActivation({ provider, label, delivery, signal, request })`
+    // ⇒ `{ childId, result, dispose }`（`dsh-subagent/lib/index.js:3032` / `:2081`）。
+    // 旧用例这里写的是 `start(provider, request)` ⇒ `{ id, result, dispose }` —— 那是**不存在**的 API，
+    // 而假运行时让所有用例照常通过。改成本形状之后，任何调用方退回旧写法都会立刻红。
+    async startActivation(spec) {
+      calls.push(spec)
       if (startError) throw new Error(startError)
       return {
-        id: 'child-session-1',
+        childId: 'child-session-1',
         result: resultError ? Promise.reject(new Error(resultError)) : Promise.resolve(result),
         dispose: async () => {
           state.disposed += 1
@@ -112,12 +126,19 @@ function makeCall(registered) {
 async function withStore(run, options) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-acceptance-test-'))
   try {
-    const { registered, ctx } = mount(options)
+    const { registered, registeredTools, ctx } = mount(options)
     apply(ctx, { dataRoot: root })
-    await run({ registered, call: makeCall(registered), root })
+    await run({ registered, registeredTools, call: makeCall(registered), root })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+}
+
+/** 调一个已注册的模型可调用工具。`exec` 缺省就是「有活着的 Agent」的正常情形。 */
+async function callTool(registeredTools, toolName, args, exec = { agent: { id: 'live', session: { id: 'live' } } }) {
+  const tool = registeredTools.get(toolName)
+  assert.ok(tool, `没有注册工具 ${toolName}`)
+  return tool.execute(args, exec)
 }
 
 async function readJson(response) {
@@ -125,7 +146,7 @@ async function readJson(response) {
 }
 
 /** 建一个含 AC-01 的任务，省掉每个用例的重复。 */
-async function seedTask(call, taskId = 't1') {
+async function seedTask(call, taskId = 't1', { confirm = true } = {}) {
   const created = await readJson(
     await call('/api/acceptance.tasks', {
       method: 'POST',
@@ -140,7 +161,24 @@ async function seedTask(call, taskId = 't1') {
     }),
   )
   assert.equal(added.status, 200, JSON.stringify(added.body))
+  // P0-3（2026-10-12）：**未确认的范围不是契约**，取证路径只对已确认项工作。
+  // 所以「一个可以取证的任务」必须包含「用户确认过验收项」这一步 —— 种子要如实模拟它，
+  // 否则所有委派用例都会撞在 `no-confirmed-criteria` 上（那不是用例坏了，是种子少了真实的一步）。
+  // `{ confirm: false }` 给「专门测确认这件事本身」的用例用。
+  if (confirm) await confirmCriteria(call, taskId, ['AC-01'])
   return taskId
+}
+
+/** 模拟「用户在验收台点确认」。确认权只属于人，测试里由这一步代劳。 */
+async function confirmCriteria(call, taskId, ids) {
+  const confirmed = await readJson(
+    await call('/api/acceptance.criteria', {
+      method: 'POST',
+      body: { taskId, ops: ids.map((id) => ({ op: 'confirm', id })) },
+    }),
+  )
+  assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body))
+  return confirmed
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +307,7 @@ test('读不存在的任务返回 404', async () => {
 
 test('验收项 add → confirm 只能一次 → delete，且 id 不复用', async () => {
   await withStore(async ({ call, root }) => {
-    await seedTask(call)
+    await seedTask(call, 't1', { confirm: false })
 
     const confirmed = await readJson(
       await call('/api/acceptance.criteria', {
@@ -929,6 +967,461 @@ test('模式 A：漏项显式落成 unknown 并注明原因 —— 沉默不等�
       assert.equal(evaluation.status, 'unknown')
       assert.match(evaluation.note, /没有这一项的结论/)
       assert.deepEqual(evaluation.evidenceIds, [])
+    },
+    { subagents, agents: liveAgents },
+  )
+})
+
+// ---------------------------------------------------------------------------
+// 工具层（SDD §14）—— 开发 Agent 主动登记 / 提交 / 取回结论
+// ---------------------------------------------------------------------------
+
+test('工具层：三个工具都注册上了，且名字与声明的常量一致', async () => {
+  const { TOOL_NAMES } = await import('../src/dsh/host/tools.js')
+  await withStore(async ({ registeredTools }) => {
+    for (const toolName of TOOL_NAMES) {
+      assert.ok(registeredTools.has(toolName), `没注册 ${toolName}`)
+    }
+    assert.equal(registeredTools.size, TOOL_NAMES.length, '多注册了未登记的工具')
+  }, { agents: liveAgents })
+})
+
+test('工具层：begin_task 登记原始需求与未确认的验收项，**不替用户确认**', async () => {
+  await withStore(
+    async ({ registeredTools, call }) => {
+      const result = await callTool(registeredTools, 'acceptance_begin_task', {
+        requirementText: '原始需求：点导出要出 CSV',
+        taskTitle: '导出 CSV',
+        criteria: [
+          { title: '能导出 CSV', origin: 'original', expected: '点击导出后下载到 .csv 文件' },
+          { title: '导出按钮有加载态', origin: 'suggested' },
+        ],
+      })
+      assert.equal(result.ok, true, JSON.stringify(result))
+      assert.equal(result.criteriaCount, 2)
+      assert.equal(result.originalCount, 1)
+      assert.equal(result.suggestedCount, 1)
+
+      // 原始需求逐字保存；验收项一律**未确认** —— 确认权在用户（SDD §2.2、PRD §4 第 2 步）。
+      const read = await readJson(await call('/api/acceptance.receipt', { query: { taskId: result.taskId } }))
+      const receipt = read.body.receipt
+      assert.equal(receipt.requirementText, '原始需求：点导出要出 CSV')
+      assert.equal(receipt.criteria.length, 2)
+      assert.equal(receipt.criteria[0].origin, 'original')
+      assert.equal(receipt.criteria[1].origin, 'suggested')
+      for (const criterion of receipt.criteria) {
+        assert.equal(criterion.confirmedByUserAt, null, `${criterion.id} 被 Agent 自动确认了`)
+      }
+      assert.deepEqual(receipt.rounds, [], '登记需求不该产生轮次')
+    },
+    { agents: liveAgents },
+  )
+})
+
+test('工具层：begin_task 没有 Agent 上下文 ⇒ 回信封，**不抛**（守卫 G20）', async () => {
+  await withStore(
+    async ({ registeredTools }) => {
+      const tool = registeredTools.get('acceptance_begin_task')
+      const result = await tool.execute({ requirementText: 'x' }, {})
+      assert.equal(result.ok, false)
+      assert.equal(result.reason, 'no-agent')
+    },
+    { agents: liveAgents },
+  )
+})
+
+test('工具层：requirementText 为空 ⇒ 拒绝（没有原始需求就没有验收契约）', async () => {
+  await withStore(
+    async ({ registeredTools }) => {
+      const result = await callTool(registeredTools, 'acceptance_begin_task', { requirementText: '   ' })
+      assert.equal(result.ok, false)
+      assert.equal(result.reason, 'invalid-requirement')
+    },
+    { agents: liveAgents },
+  )
+})
+
+test('工具层：参数 schema 里**不许**出现 sessionId / workspace / cwd（守卫 G14）', async () => {
+  await withStore(
+    async ({ registeredTools }) => {
+      for (const [toolName, tool] of registeredTools) {
+        const json = JSON.stringify(tool.parameters ?? {})
+        for (const forbidden of ['sessionId', 'workspace', 'cwd']) {
+          assert.ok(!json.includes(forbidden), `${toolName} 的参数里出现了 ${forbidden} —— 身份只能由宿主解析`)
+        }
+      }
+    },
+    { agents: liveAgents },
+  )
+})
+
+test('工具层：submit_delivery 在验收项未确认时拒绝取证 —— 未确认的范围不是契约', async () => {
+  let called = 0
+  const subagents = fakeSubagents({ result: { stopReason: 'end-turn', structured: { criteria: [] } } })
+  await withStore(
+    async ({ registeredTools }) => {
+      const begun = await callTool(registeredTools, 'acceptance_begin_task', {
+        requirementText: '原始需求：点导出要出 CSV',
+        criteria: [{ title: '能导出 CSV', origin: 'original' }],
+      })
+      const submitted = await callTool(registeredTools, 'acceptance_submit_delivery', { taskId: begun.taskId })
+      assert.equal(submitted.ok, false)
+      assert.equal(submitted.reason, 'criteria-not-confirmed')
+      called += 1
+    },
+    { subagents, agents: liveAgents },
+  )
+  assert.equal(called, 1)
+  assert.equal(subagents.calls.length, 0, '未确认的契约不该触发任何委派')
+})
+
+test('工具层：登记 → 确认 → 提交 ⇒ 委派一次并逐条回传结论', async () => {
+  const structured = {
+    criteria: [
+      {
+        id: 'AC-01',
+        status: 'pass',
+        evidence: [
+          {
+            kind: 'command',
+            text: '跑导出命令',
+            locator: 'node -e "require(\'./export.js\')"',
+            exitCode: 0,
+          },
+        ],
+      },
+    ],
+  }
+  const subagents = fakeSubagents({ result: { stopReason: 'end-turn', structured } })
+  await withStore(
+    async ({ registeredTools, call }) => {
+      const begun = await callTool(registeredTools, 'acceptance_begin_task', {
+        requirementText: '原始需求：点导出要出 CSV',
+        criteria: [{ title: '能导出 CSV', origin: 'original', expected: '导出出 .csv' }],
+      })
+      const confirmed = await readJson(
+        await call('/api/acceptance.criteria', {
+          method: 'POST',
+          body: { taskId: begun.taskId, ops: [{ op: 'confirm', id: 'AC-01' }] },
+        }),
+      )
+      assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body))
+
+      const submitted = await callTool(registeredTools, 'acceptance_submit_delivery', {
+        taskId: begun.taskId,
+        summary: '写了导出函数',
+        commandsRun: [{ command: 'node -e "..."', exitCode: 0 }],
+      })
+      assert.equal(submitted.ok, true, JSON.stringify(submitted))
+      assert.equal(submitted.runStatus, 'succeeded')
+      assert.equal(submitted.criteria.length, 1)
+      assert.equal(submitted.criteria[0].status, 'pass')
+      assert.equal(submitted.criteria[0].evidenceIds.length, 1, '结论必须带宿主分配的 evidenceId')
+      // 声明只是线索：它不产生验收项状态，也不进 evidence。
+      assert.equal(subagents.calls.length, 1)
+    },
+    { subagents, agents: liveAgents },
+  )
+})
+
+test('工具层：get_result 是只读的 —— 调它不产生轮次、不改凭证', async () => {
+  const subagents = fakeSubagents({ result: { stopReason: 'end-turn', structured: { criteria: [] } } })
+  await withStore(
+    async ({ registeredTools }) => {
+      const begun = await callTool(registeredTools, 'acceptance_begin_task', {
+        requirementText: '原始需求：点导出要出 CSV',
+        criteria: [{ title: '能导出 CSV', origin: 'original' }],
+      })
+      const first = await callTool(registeredTools, 'acceptance_get_result', { taskId: begun.taskId })
+      const second = await callTool(registeredTools, 'acceptance_get_result', { taskId: begun.taskId })
+      assert.equal(first.ok, true)
+      assert.equal(first.round, 0)
+      assert.deepEqual(first, second, '两次取回必须完全相同 —— 只读就是不产生任何东西')
+      assert.equal(subagents.calls.length, 0)
+    },
+    { subagents, agents: liveAgents },
+  )
+})
+
+test('工具层：取不存在的任务 ⇒ 回信封而不是抛（守卫 G20）', async () => {
+  await withStore(
+    async ({ registeredTools }) => {
+      // 格式合法但不存在 ⇒ no-such-task；格式非法 ⇒ invalid-task-id（不许说成 internal-error）。
+      const missing = await callTool(registeredTools, 'acceptance_get_result', { taskId: 'no-such-task' })
+      assert.equal(missing.ok, false)
+      assert.equal(missing.reason, 'no-such-task')
+
+      const malformed = await callTool(registeredTools, 'acceptance_get_result', { taskId: '没有这个任务' })
+      assert.equal(malformed.ok, false)
+      assert.equal(malformed.reason, 'invalid-task-id')
+
+      const empty = await callTool(registeredTools, 'acceptance_get_result', {})
+      assert.equal(empty.ok, false)
+      assert.equal(empty.reason, 'invalid-task-id')
+    },
+    { agents: liveAgents },
+  )
+})
+
+test('模式 A：服务在但没有可编程委派入口 ⇒ 说成「宿主不可委派」，不是「没有服务」', async () => {
+  // 2026-10-12 真机踩到：headless 的 subagents 服务对象存在、`list()` 有 provider，
+  // 就是没有 `start`。旧消息写成「没有 subagents 服务」—— 把「不提供该 API」说成「服务不存在」，
+  // 排查时会照着错方向找。三种成因必须是三句不同的话。
+  const noStart = { list: () => ['spawn', 'fork'] }
+  await withStore(
+    async ({ call }) => {
+      await seedTask(call, 't1')
+      const response = await readJson(
+        await call('/api/acceptance.verify', { method: 'POST', query: { taskId: 't1' }, body: { sessionId: 'live' } }),
+      )
+      assert.equal(response.status, 400)
+      assert.match(response.body.error, /服务在/, '必须说清服务本身在，缺的是委派入口')
+      assert.match(response.body.error, /start/)
+      assert.match(response.body.error, /spawn/)
+    },
+    { subagents: noStart, agents: liveAgents },
+  )
+})
+
+test('工具层：没有 subagents 服务时提交 ⇒ 回信封（承诺点之前，不写轮次）', async () => {
+  await withStore(
+    async ({ registeredTools, call }) => {
+      const begun = await callTool(registeredTools, 'acceptance_begin_task', {
+        requirementText: '需求',
+        criteria: [{ title: '一条', origin: 'original' }],
+      })
+      await call('/api/acceptance.criteria', {
+        method: 'POST',
+        body: { taskId: begun.taskId, ops: [{ op: 'confirm', id: 'AC-01' }] },
+      })
+      const submitted = await callTool(registeredTools, 'acceptance_submit_delivery', { taskId: begun.taskId })
+      assert.equal(submitted.ok, false)
+      assert.equal(submitted.reason, 'no-delegation-api')
+      const receipt = await readJson(await call('/api/acceptance.receipt', { query: { taskId: begun.taskId } }))
+      assert.equal(receipt.body.receipt.rounds.length, 0, '承诺点之前失败不许留轮次')
+    },
+    { agents: liveAgents },
+  )
+})
+
+test('工具层 / S6a：工具上下文里的 exec.agent 就是签发给子 Agent 的 parent，且落轮次带证据', async () => {
+  // 这条钉的是 S6a 在**本进程内**可验的那一半：委派拿到的 `parent` 必须来自
+  // `exec.agent`（工具上下文里唯一可信的身份来源），而不是按 sessionId 去注册表里另查一个
+  // —— 后者在真机上仍可能查到**别的**会话，把结论记到错的凭证上。
+  const structured = {
+    criteria: [
+      {
+        id: 'AC-01',
+        status: 'pass',
+        evidence: [
+          { kind: 'file', text: '导出行', locator: '/tmp/export.js:12' },
+        ],
+      },
+    ],
+  }
+  const subagents = fakeSubagents({ result: { stopReason: 'end-turn', structured } })
+  const toolAgent = { id: 'tool-agent', session: { id: 'live' } }
+  await withStore(
+    async ({ registeredTools, call }) => {
+      const begun = await callTool(registeredTools, 'acceptance_begin_task', {
+        requirementText: '原始需求：点导出要出 CSV',
+        criteria: [{ title: '能导出 CSV', origin: 'original' }],
+      })
+      await call('/api/acceptance.criteria', {
+        method: 'POST',
+        body: { taskId: begun.taskId, ops: [{ op: 'confirm', id: 'AC-01' }] },
+      })
+      const submitted = await callTool(
+        registeredTools,
+        'acceptance_submit_delivery',
+        { taskId: begun.taskId, summary: '写了导出函数' },
+        { agent: toolAgent },
+      )
+      assert.equal(submitted.ok, true, JSON.stringify(submitted))
+
+      // 1) 签发出去的 `parent` 必须**恒等于** exec.agent 那个对象。
+      assert.equal(subagents.calls.length, 1)
+      assert.equal(subagents.calls[0].request.parent, toolAgent, 'parent 不是 exec.agent —— 身份被换成了注册表里查到的另一个')
+      // 2) outputSchema 必须同时给（N1：只有宿主 API 有这个参数）。
+      assert.equal(subagents.calls[0].request.outputSchema.type, 'object')
+      // 3) 落下来的轮次带真实 locator 的证据，且 producedBy 是 agent。
+      const read = await readJson(await call('/api/acceptance.receipt', { query: { taskId: begun.taskId } }))
+      const receipt = read.body.receipt
+      assert.equal(receipt.rounds.length, 1)
+      assert.equal(receipt.rounds[0].producedBy, 'agent')
+      assert.equal(receipt.rounds[0].provenance.fingerprint, null, '版本指纹首版恒 null')
+      assert.equal(receipt.evidence.length, 1)
+      assert.equal(receipt.evidence[0].ref.locator, '/tmp/export.js:12')
+    },
+    { subagents, agents: { get: () => undefined } },
+  )
+})
+
+test('工具层 / S6a：`parent` 必须是注册表里那个**活着的**对象 —— 冒充/已销毁的必须被拒', async () => {
+  // 真机规则（`dsh-subagent/lib/types/index.js:144`）逐字：
+  //   subagent creation requires the exact live parent agent → 违反抛 UNAUTHORIZED
+  // 即 `agents.get(parent.id) !== parent` 就拒。这条把「为什么身份只能来自 exec.agent」从**风格**变成**机制**：
+  // 自己拼一个 parent、或拿一个宿主重启前就死掉的 Agent，都会**确定性失败**。
+  const structured = { criteria: [{ id: 'AC-01', status: 'unknown', evidence: [], note: '查不到' }] }
+  const liveAgent = { id: 'live', session: { id: 'live' } }
+
+  // 假运行时按真机的规则判定 parent：拿注册表核对引用。
+  const registry = new Map([['live', liveAgent]])
+  const strictSubagents = {
+    calls: [],
+    list: () => ['spawn'],
+    // 真机形状：`startActivation(spec)`，且 **spec.signal 必须在**（真机先 `spec.signal.throwIfAborted()`）。
+    async startActivation(spec) {
+      this.calls.push(spec)
+      if (!spec.signal) throw new TypeError("Cannot read properties of undefined (reading 'throwIfAborted')")
+      const request = spec.request
+      if (registry.get(request.parent?.id) !== request.parent) {
+        throw new Error('subagent creation requires the exact live parent agent')
+      }
+      return { childId: 'child', result: Promise.resolve({ stopReason: 'end-turn', structured }), dispose: async () => {} }
+    },
+  }
+
+  const seedConfirmed = async (registeredTools, call) => {
+    const begun = await callTool(registeredTools, 'acceptance_begin_task', {
+      requirementText: '原始需求',
+      criteria: [{ title: '一条', origin: 'original' }],
+    })
+    await call('/api/acceptance.criteria', {
+      method: 'POST',
+      body: { taskId: begun.taskId, ops: [{ op: 'confirm', id: 'AC-01' }] },
+    })
+    return begun.taskId
+  }
+
+  // ① 正例：exec.agent 就是注册表里那个对象 ⇒ 通过，且**落一轮**。
+  await withStore(
+    async ({ registeredTools, call }) => {
+      const taskId = await seedConfirmed(registeredTools, call)
+      const submitted = await callTool(
+        registeredTools,
+        'acceptance_submit_delivery',
+        { taskId },
+        { agent: liveAgent },
+      )
+      assert.equal(submitted.ok, true, JSON.stringify(submitted))
+      const read = await readJson(await call('/api/acceptance.receipt', { query: { taskId } }))
+      assert.equal(read.body.receipt.rounds.length, 1)
+    },
+    { subagents: strictSubagents, agents: { get: (id) => registry.get(id) } },
+  )
+
+  // ② 反例：冒充的 parent（同 id 但**不是**注册表里那个对象）⇒ 被拒，且按承诺点分层写一轮 blocked。
+  const impostor = { id: 'live', session: { id: 'live' } }
+  await withStore(
+    async ({ registeredTools, call }) => {
+      const taskId = await seedConfirmed(registeredTools, call)
+      const submitted = await callTool(
+        registeredTools,
+        'acceptance_submit_delivery',
+        { taskId },
+        { agent: impostor },
+      )
+      assert.equal(submitted.ok, false, '冒充的 parent 不该成功')
+      assert.equal(submitted.reason, 'blocked-round')
+      const read = await readJson(await call('/api/acceptance.receipt', { query: { taskId } }))
+      assert.equal(read.body.receipt.rounds.length, 1, '承诺点之后失败必须留一轮')
+      assert.match(read.body.receipt.rounds[0].blockedReason, /exact live parent/)
+      assert.deepEqual(read.body.receipt.rounds[0].evaluations, [], '不部分写入')
+    },
+    { subagents: strictSubagents, agents: { get: (id) => registry.get(id) } },
+  )
+})
+
+// ---------------------------------------------------------------------------
+// P0-3（2026-10-12）：两条取证路径遵守**同一条**确认规则
+// ---------------------------------------------------------------------------
+
+test('P0-3：一条 confirmed 都没有 ⇒ 不发起委派（承诺点之前 4xx，不写轮次）', async () => {
+  const subagents = fakeSubagents({ result: { stopReason: 'end-turn', structured: { criteria: [] } } })
+  await withStore(
+    async ({ call }) => {
+      // 种一个**未确认**的任务：这正是 P0-2 描述的「0 确认」状态
+      await seedTask(call, 't1', { confirm: false })
+      const response = await readJson(
+        await call('/api/acceptance.verify', { method: 'POST', query: { taskId: 't1' }, body: { sessionId: 'live' } }),
+      )
+      assert.equal(response.status, 400)
+      assert.match(response.body.error, /都还没确认/)
+      assert.match(response.body.error, /AC-01/, '要把未确认项列出来，人一眼知道去确认什么')
+      assert.equal(subagents.calls.length, 0, '一条确认都没有就不该发起委派')
+      const receipt = await readJson(await call('/api/acceptance.receipt', { query: { taskId: 't1' } }))
+      assert.equal(receipt.body.receipt.rounds.length, 0, '承诺点之前失败不留轮次')
+    },
+    { subagents, agents: liveAgents },
+  )
+})
+
+test('P0-3：部分确认 ⇒ 只对已确认项取证，未确认项被跳过并写进 provenance', async () => {
+  const structured = {
+    criteria: [
+      { id: 'AC-01', status: 'pass', evidence: [{ kind: 'file', text: 'x', locator: '/tmp/a.js:1' }] },
+    ],
+  }
+  const subagents = fakeSubagents({ result: { stopReason: 'end-turn', structured } })
+  await withStore(
+    async ({ call }) => {
+      await seedTask(call, 't1', { confirm: false })
+      // 再加一条，然后**只确认 AC-01** —— AC-02 保持未确认
+      await call('/api/acceptance.criteria', {
+        method: 'POST',
+        body: { taskId: 't1', ops: [{ op: 'add', criterion: { title: '第二条', origin: 'original' } }] },
+      })
+      await confirmCriteria(call, 't1', ['AC-01'])
+
+      const response = await readJson(
+        await call('/api/acceptance.verify', { method: 'POST', query: { taskId: 't1' }, body: { sessionId: 'live' } }),
+      )
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+
+      // ① 委派**只带已确认的那一条**（提示词与 schema 都收窄）
+      const request = subagents.calls[0].request
+      assert.ok(!JSON.stringify(request.outputSchema).includes('AC-02'), 'schema 里不该出现未确认项')
+      assert.ok(!request.prompt[0].text.includes('第二条'), '提示词里不该出现未确认项')
+
+      // ② 被跳过的项被**写下来**（不是静默）
+      const round = response.body.receipt.rounds[0]
+      assert.deepEqual(round.provenance.skippedUnconfirmed, ['AC-02'])
+
+      // ③ 未确认项仍然「待验收」，**没有**因为这一轮而变成通过
+      const receipt = await readJson(await call('/api/acceptance.receipt', { query: { taskId: 't1' } }))
+      const criteria = receipt.body.receipt.criteria
+      assert.equal(criteria.find((c) => c.id === 'AC-02').confirmedByUserAt, null, '宿主没替用户确认')
+      assert.equal(receipt.body.derived.statuses['AC-02'] ?? 'pending', 'pending', '未确认项不得被当成已取证')
+      assert.equal(receipt.body.derived.statuses['AC-01'], 'pass')
+    },
+    { subagents, agents: liveAgents },
+  )
+})
+
+test('P0-3：Agent 提交路径与 UI 路径同规则 —— 一条 confirmed 都没有时两侧都拒', async () => {
+  const subagents = fakeSubagents({ result: { stopReason: 'end-turn', structured: { criteria: [] } } })
+  await withStore(
+    async ({ call, registeredTools }) => {
+      const begun = await callTool(registeredTools, 'acceptance_begin_task', {
+        requirementText: '需求',
+        criteria: [{ title: '一条', origin: 'original' }],
+      })
+      // 都不确认
+      const submitted = await callTool(registeredTools, 'acceptance_submit_delivery', { taskId: begun.taskId })
+      assert.equal(submitted.ok, false)
+      assert.equal(submitted.reason, 'criteria-not-confirmed', 'Agent 路径拒')
+
+      const verified = await readJson(
+        await call('/api/acceptance.verify', {
+          method: 'POST',
+          query: { taskId: begun.taskId },
+          body: { sessionId: 'live' },
+        }),
+      )
+      assert.equal(verified.status, 400, 'UI 路径同样拒')
+      assert.match(verified.body.error, /都还没确认/)
+      assert.equal(subagents.calls.length, 0, '两条路径都不该发起委派')
     },
     { subagents, agents: liveAgents },
   )

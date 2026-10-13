@@ -171,7 +171,12 @@ export function shippedBundleIsFresh() {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { out, bytes, hash, externals } = await writeClientBundle()
-  console.log(`built ${CLIENT_OUTPUT} (${(bytes / 1024).toFixed(1)} KB) → ${out}`)
-  console.log(`  source hash : ${hash}`)
-  console.log(`  externals   : ${externals.join(', ') || '(none)'}`)
+  // ⚠️ 这些进度行必须走 **stderr**。
+  // 这个脚本是 `prepack` 钩子，而发布判据要跑 `npm pack --dry-run --json` —— 它把结果 JSON 写在 **stdout**。
+  // 进度行一走 stdout，两者就混在一起，解析直接失败：脚本报的是「包内容判据没查」，
+  // 而人看到的是一段 JSONDecodeError —— 很容易被误判成「npm 坏了」而不是「我们把 stdout 弄脏了」。
+  // 2026-10-13 真机撞到：`check-release-ready` 的唯一一条「必须处理」就是它。
+  console.error(`built ${CLIENT_OUTPUT} (${(bytes / 1024).toFixed(1)} KB) → ${out}`)
+  console.error(`  source hash : ${hash}`)
+  console.error(`  externals   : ${externals.join(', ') || '(none)'}`)
 }

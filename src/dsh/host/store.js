@@ -16,7 +16,7 @@ const FILE_MODE = 0o600
 const DIR_MODE = 0o700
 
 /** taskId 同时用作文件名 ⇒ 必须白名单，否则 `../` 就能写出目录。 */
-const SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+export const SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 
 /** 默认根 = `~/.dsh/acceptance`。 */
 export function defaultRoot() {

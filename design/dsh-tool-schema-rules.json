@@ -1,0 +1,45 @@
+{
+  "$comment": "DSH 工具 schema 校验器的规则快照 —— 从真机运行时源码抄下来的，不是猜的。",
+  "source": {
+    "package": "@deepseek-ai/dsh-tools",
+    "version": "0.2.1-alpha.2",
+    "path": "node_modules/@deepseek-ai/dsh-tools/lib/index.js",
+    "symbols": {
+      "keywords": "checkSchemaNode 的 `!KEYWORDS.has(key)` 分支",
+      "types": "const SCHEMA_TYPES",
+      "siblings": "const ONE_OF_SIBLING_KEYWORDS",
+      "annotations": "const ANNOTATION_KEYS",
+      "register": "ToolService.register(definition)"
+    },
+    "extractedAt": "2026-10-12",
+    "extractedWith": "ELECTRON_RUN_AS_NODE=1 \"/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness\" -e \"const fs=require('fs');…\""
+  },
+  "keywords": [
+    "type",
+    "oneOf",
+    "properties",
+    "required",
+    "additionalProperties",
+    "items",
+    "enum",
+    "const",
+    "description",
+    "title",
+    "default",
+    "examples"
+  ],
+  "types": ["object", "array", "string", "number", "integer", "boolean", "null"],
+  "annotations": ["description", "title", "default", "examples"],
+  "oneOfSiblingKeywords": ["properties", "required", "additionalProperties", "items", "enum", "const"],
+  "rules": [
+    "`type` 与 `oneOf` 不能同时声明",
+    "既没有 `type` 也没有 `oneOf` 时，只要出现 oneOf 的同级关键字就违规",
+    "`oneOf` 必须是长度 ≥ 2 的数组",
+    "`type` 必须是单个字符串，**不支持 type 数组**",
+    "`properties` / `required` / `additionalProperties` 只能用在 `type: \"object\"` 上",
+    "`items` 只能用在 `type: \"array\"` 上",
+    "`enum` / `const` 只能用在标量类型上，且 `enum` 必须是非空数组、元素类型与 `type` 匹配",
+    "同时声明 `enum` 与 `const` 时，`const` 必须是 `enum` 之一",
+    "`:2879` —— `register()` 要求 `output` **必须**存在，且 `output.render` 是函数；缺了就 **抛**，而注册通常在循环里 ⇒ 会把**整批**工具一起带崩"
+  ]
+}
